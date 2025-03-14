@@ -6,7 +6,7 @@ from src.config.settings import Config
 
 
 class GraphManager:
-    def __init__(self, config):
+    def __init__(self, config, *args, **kwargs):
         self.config = config
         try:
             self.graph = Neo4jGraph(

@@ -9,7 +9,7 @@ from src.config.settings import Config
 class LLMManager:
     """Manages interactions with the language model."""
 
-    def __init__(self, config: Config):
+    def __init__(self, config, *args, **kwargs):
         """Initialize the LLM manager with configuration."""
         self.config = config
         try:

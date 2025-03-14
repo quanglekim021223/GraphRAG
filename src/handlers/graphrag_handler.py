@@ -11,12 +11,12 @@ class HealthcareGraphRAG:
     """Main GraphRAG system for healthcare data retrieval and question answering."""
     _instance = None
 
-    def __new__(cls):
+    def __new__(cls, *args, **kwargs):
         if cls._instance is None:
             cls._instance = super(HealthcareGraphRAG, cls).__new__(cls)
         return cls._instance
 
-    def __init__(self):
+    def __init__(self, *args, **kwargs):
         # Ngăn chặn khởi tạo lại nếu đã tồn tại
         if not hasattr(self, '_initialized'):
             self.config = Config()  # Sử dụng instance singleton của Config

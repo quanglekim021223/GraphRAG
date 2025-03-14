@@ -18,12 +18,12 @@ class Config:
 
     _instance = None
 
-    def __new__(cls):
+    def __new__(cls, *args, **kwargs):
         if cls._instance is None:
             cls._instance = super(Config, cls).__new__(cls)
         return cls._instance
 
-    def __init__(self):
+    def __init__(self, *args, **kwargs):
         # Ngăn chặn khởi tạo lại nếu đã tồn tại
         if not hasattr(self, '_initialized'):
             self.github_token = os.getenv("GITHUB_TOKEN", "")
