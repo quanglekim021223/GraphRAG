@@ -9,21 +9,34 @@ from src.handlers.llm_manager import LLMManager
 
 class HealthcareGraphRAG:
     """Main GraphRAG system for healthcare data retrieval and question answering."""
+    _instance = None
 
-    def __init__(self, config: Config) -> None:
-        """Initialize the GraphRAG system with configuration."""
-        self.config = config
-        self.graph_manager = GraphManager(config)
-        self.llm_manager = LLMManager(config)
-        self.schema = self.graph_manager.get_schema()
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super(HealthcareGraphRAG, cls).__new__(cls)
+        return cls._instance
 
-        try:
-            self.langsmith_client = Client()
-            logger.info("LangSmith client initialized successfully.")
-        except Exception as e:
-            logger.warning(f"LangSmith client initialization failed: {str(e)}")
+    def __init__(self):
+        # Ngăn chặn khởi tạo lại nếu đã tồn tại
+        if not hasattr(self, '_initialized'):
+            self.config = Config()  # Sử dụng instance singleton của Config
+            self.graph_manager = GraphManager(self.config)
+            self.llm_manager = LLMManager(self.config)
+            self.schema = self.graph_manager.get_schema()
 
-    def get_pipeline(self) -> RunnableSequence:
+            try:
+                self.langsmith_client = Client()
+                logger.info("LangSmith client initialized successfully.")
+            except Exception as e:
+                logger.warning(
+                    f"LangSmith client initialization failed: {str(e)}")
+
+            # Khởi tạo pipeline một lần trong __init__
+            self.pipeline = self._create_pipeline()
+
+            self._initialized = True
+
+    def _create_pipeline(self) -> RunnableSequence:
         """Create the GraphRAG processing pipeline."""
         pipeline = (
             {"question": RunnablePassthrough(), "schema": RunnableLambda(
@@ -54,8 +67,8 @@ class HealthcareGraphRAG:
     def run(self, question: str) -> Dict[str, Any]:
         """Run the GraphRAG pipeline on a question."""
         try:
-            pipeline = self.get_pipeline()
-            result = pipeline.invoke(question)
+            # Sử dụng pipeline đã khởi tạo thay vì tạo mới
+            result = self.pipeline.invoke(question)
             logger.info(
                 f"Successfully processed query: '{question}' with result: {result}")
             return result

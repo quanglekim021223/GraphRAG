@@ -8,10 +8,10 @@ from src.config.settings import Config
 
 @tool
 def rag_tool(question: str) -> str:
-    """Use this tool to query specific healthcare data from the database, such as patient information, diseases, doctor, hospital, insurance provider, room or treatments."""
+    """Use this tool to query specific healthcare data from the database."""
     try:
-        config = Config()
-        graphrag = HealthcareGraphRAG(config)
+        # Sử dụng instance singleton của HealthcareGraphRAG
+        graphrag = HealthcareGraphRAG()
         result = graphrag.run(question)
         logger.info(f"Raw GraphRAG result: {result}")
         if isinstance(result, dict) and "response" in result:

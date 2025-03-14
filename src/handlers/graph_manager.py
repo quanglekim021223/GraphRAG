@@ -6,16 +6,13 @@ from src.config.settings import Config
 
 
 class GraphManager:
-    """Manages interactions with the Neo4j graph database."""
-
-    def __init__(self, config: Config):
-        """Initialize the graph manager with configuration."""
+    def __init__(self, config):
         self.config = config
         try:
             self.graph = Neo4jGraph(
-                url=config.neo4j_uri,
-                username=config.neo4j_username,
-                password=config.neo4j_password
+                url=self.config.neo4j_uri,
+                username=self.config.neo4j_username,
+                password=self.config.neo4j_password
             )
             self.schema = self.graph.get_structured_schema
             logger.info("Neo4j schema loaded successfully.")

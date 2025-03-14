@@ -4,12 +4,14 @@ from src.helpers.logging_config import logger
 from src.handlers.graphrag_handler import HealthcareGraphRAG
 from src.config.settings import Config
 
+# Khởi tạo singleton instances ở cấp module
+config = Config()
+graphrag = HealthcareGraphRAG()
+
 
 def store_conversation(thread_id: str, user_input: str, response: str):
     """Store conversation history in Neo4j."""
     try:
-        config = Config()
-        graphrag = HealthcareGraphRAG(config)
         with graphrag.graph_manager.graph._driver.session() as session:
             session.run(
                 """
@@ -28,8 +30,6 @@ def store_conversation(thread_id: str, user_input: str, response: str):
 def get_conversation_history(thread_id: str) -> List[Dict[str, str]]:
     """Retrieve conversation history from Neo4j."""
     try:
-        config = Config()
-        graphrag = HealthcareGraphRAG(config)
         with graphrag.graph_manager.graph._driver.session() as session:
             result = session.run(
                 """
@@ -54,8 +54,6 @@ def get_conversation_history(thread_id: str) -> List[Dict[str, str]]:
 def get_all_conversations() -> List[str]:
     """Retrieve all conversation thread_ids from Neo4j."""
     try:
-        config = Config()
-        graphrag = HealthcareGraphRAG(config)
         with graphrag.graph_manager.graph._driver.session() as session:
             result = session.run(
                 """

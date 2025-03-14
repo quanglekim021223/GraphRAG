@@ -16,6 +16,24 @@ class Config:
     neo4j_username: str = os.getenv("NEO4J_USERNAME", "neo4j")
     neo4j_password: str = os.getenv("NEO4J_PASSWORD", "12345678")
 
+    _instance = None
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super(Config, cls).__new__(cls)
+        return cls._instance
+
+    def __init__(self):
+        # Ngăn chặn khởi tạo lại nếu đã tồn tại
+        if not hasattr(self, '_initialized'):
+            self.github_token = os.getenv("GITHUB_TOKEN", "")
+            self.endpoint = "https://models.inference.ai.azure.com"
+            self.model_name = "gpt-4o-mini"
+            self.neo4j_uri = os.getenv("NEO4J_URI", "bolt://localhost:7689")
+            self.neo4j_username = os.getenv("NEO4J_USERNAME", "neo4j")
+            self.neo4j_password = os.getenv("NEO4J_PASSWORD", "12345678")
+            self._initialized = True
+
     def validate(self) -> None:
         """Validate the configuration."""
         required_vars = ["GITHUB_TOKEN", "NEO4J_URI",
