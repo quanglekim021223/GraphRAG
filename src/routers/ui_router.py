@@ -9,7 +9,7 @@ from langgraph.prebuilt import create_react_agent
 from langchain_openai import ChatOpenAI
 from src.helpers.logging_config import logger
 from src.config.settings import Config
-from src.helpers.agent_initializer import initialize_agent
+from src.helpers.agent_initializer import agent_initializer
 from src.handlers.conversation_handler import store_conversation, get_conversation_history, get_all_conversations
 
 
@@ -50,7 +50,7 @@ def main():
             return
 
         # Initialize agent
-        agent_executor = initialize_agent()
+        agent_executor = agent_initializer.get_agent()
 
         # Initialize session state
         if "conversations" not in st.session_state:

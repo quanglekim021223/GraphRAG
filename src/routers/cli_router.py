@@ -4,7 +4,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.prebuilt import create_react_agent
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
-from src.helpers.agent_initializer import initialize_agent
+from src.helpers.agent_initializer import agent_initializer
 import uuid
 
 
@@ -14,7 +14,7 @@ def run_cli():
     config.validate()
 
     # Initialize ReAct agent with both tools
-    agent_executor = initialize_agent()
+    agent_executor = agent_initializer.get_agent()
 
     print("Healthcare GraphRAG CLI")
     print("Type 'exit' to quit")

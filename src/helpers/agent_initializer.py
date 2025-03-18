@@ -3,21 +3,28 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.prebuilt import create_react_agent
 from langchain_openai import ChatOpenAI
 from src.helpers.tools import rag_tool, llm_tool
+from src.helpers.llm_initializer import get_llm
 
 
-def initialize_agent():
-    """Initialize the ReAct agent with tools.
+class AgentInitializer:
+    _instance = None
 
-    Returns:
-        ReAct agent ready to process queries using RAG or LLM tools.
-    """
-    config = Config()
-    memory = MemorySaver()
-    model = ChatOpenAI(
-        base_url=config.endpoint,
-        api_key=config.github_token,
-        model_name=config.model_name,
-        temperature=0.3
-    )
-    tools = [rag_tool, llm_tool]
-    return create_react_agent(model, tools, checkpointer=memory)
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super(AgentInitializer, cls).__new__(cls)
+            cls._instance._initialize_agent()
+        return cls._instance
+
+    def _initialize_agent(self):
+        config = Config()
+        memory = MemorySaver()
+        self.llm = get_llm()
+        tools = [rag_tool, llm_tool]
+        self.agent = create_react_agent(self.llm, tools, checkpointer=memory)
+
+    def get_agent(self):
+        return self.agent
+
+
+agent_initializer = AgentInitializer()
+agent_initializer._initialize_agent()
