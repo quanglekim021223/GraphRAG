@@ -65,3 +65,21 @@ def get_all_conversations() -> List[str]:
     except Exception as e:
         logger.error(f"Error retrieving conversations: {str(e)}")
         return []
+
+
+def delete_conversation(thread_id: str) -> bool:
+    """Delete a conversation and its messages from Neo4j."""
+    try:
+        with graphrag.graph_manager.graph._driver.session() as session:
+            session.run(
+                """
+                MATCH (c:Conversation {thread_id: $thread_id})-[:HAS_MESSAGE]->(m:Message)
+                DETACH DELETE c, m
+                """,
+                {"thread_id": thread_id}
+            )
+        logger.info(f"Deleted conversation for thread_id: {thread_id}")
+        return True
+    except Exception as e:
+        logger.error(f"Error deleting conversation: {str(e)}")
+        return False

@@ -10,7 +10,27 @@ from langchain_openai import ChatOpenAI
 from src.helpers.logging_config import logger
 from src.config.settings import Config
 from src.helpers.agent_initializer import agent_initializer
-from src.handlers.conversation_handler import store_conversation, get_conversation_history, get_all_conversations
+from src.handlers.conversation_handler import store_conversation, get_conversation_history, get_all_conversations, delete_conversation
+from src.handlers.graphrag_handler import HealthcareGraphRAG
+
+
+def generate_conversation_name(messages):
+    """Tạo tên dễ đọc cho cuộc hội thoại từ tin nhắn đầu tiên."""
+    if not messages:
+        return "Cuộc hội thoại mới"
+
+    # Lấy tin nhắn đầu tiên của user
+    for message in messages:
+        if message["role"] == "user":
+            content = message["content"]
+            # Cắt nội dung để tạo tên ngắn gọn
+            words = content.split()[:4]  # Lấy tối đa 4 từ đầu
+            name = " ".join(words)
+            if len(name) > 30:
+                name = name[:27] + "..."
+            return name
+
+    return "Cuộc hội thoại mới"
 
 
 def main():
@@ -77,31 +97,37 @@ def main():
         with tab1:
             # Conversation selector
             st.subheader("Chọn hoặc tạo cuộc hội thoại")
-            conversation_options = st.session_state.conversations + \
-                ["Tạo cuộc hội thoại mới"]
-            selected_conversation = st.selectbox(
+            conversation_options = []
+            conversation_map = {}  # Map UUID to friendly name
+
+            # Generate friendly names for all conversations
+            for thread_id in st.session_state.conversations:
+                history = get_conversation_history(thread_id)
+                friendly_name = generate_conversation_name(history)
+                # Thêm UUID ở cuối để đảm bảo không trùng lặp
+                display_name = f"{friendly_name} ({thread_id[:6]})"
+                conversation_options.append(display_name)
+                conversation_map[display_name] = thread_id
+
+            # Add option to create new conversation
+            conversation_options.append("Tạo cuộc hội thoại mới")
+
+            selected_option = st.selectbox(
                 "Chọn cuộc hội thoại:", conversation_options)
 
-            if selected_conversation == "Tạo cuộc hội thoại mới":
+            if selected_option == "Tạo cuộc hội thoại mới":
                 new_thread_id = str(uuid.uuid4())
                 st.session_state.conversations.append(new_thread_id)
                 st.session_state.current_thread_id = new_thread_id
                 st.session_state.messages = []
-                # Buộc tải lại trang để cập nhật tiêu đề tab
                 st.rerun()
             else:
-                if st.session_state.current_thread_id != selected_conversation:
-                    st.session_state.current_thread_id = selected_conversation
+                selected_thread_id = conversation_map[selected_option]
+                if st.session_state.current_thread_id != selected_thread_id:
+                    st.session_state.current_thread_id = selected_thread_id
                     st.session_state.messages = get_conversation_history(
-                        selected_conversation)
-                    # Buộc tải lại trang để cập nhật tiêu đề tab
+                        selected_thread_id)
                     st.rerun()
-
-            # Display conversation history
-            st.subheader("Lịch sử hội thoại")
-            for message in st.session_state.messages:
-                with st.chat_message(message["role"]):
-                    st.write(message["content"])
 
             # Add scroll button
             if st.button("Cuộn xuống để nhập câu hỏi"):
@@ -109,6 +135,7 @@ def main():
 
             # Chat input
             user_input = st.chat_input("Nhập câu hỏi của bạn...")
+            # Thay thế đoạn code xử lý chatbot hiện tại
             if user_input:
                 st.session_state.messages.append(
                     {"role": "user", "content": user_input})
@@ -116,19 +143,20 @@ def main():
                     st.write(user_input)
 
                 try:
-                    system_message = SystemMessage(content="""
-                    You are a healthcare assistant. Based on the user's question:
-                    - If the question is about specific patient data, diseases, doctor, hospital, insurance provider, room or treatments, use the 'rag_tool'.
-                    - If the question is general or no specific data is needed, use the 'llm_tool'.
-                    """)
+                    with st.spinner('Đang xử lý câu hỏi của bạn...'):
+                        system_message = SystemMessage(content="""
+                        You are a healthcare assistant. Based on the user's question:
+                        - If the question is about specific patient data, diseases, doctor, hospital, insurance provider, room or treatments, use the 'rag_tool'.
+                        - If the question is general or no specific data is needed, use the 'llm_tool'.
+                        """)
 
-                    config = {"configurable": {
-                        "thread_id": st.session_state.current_thread_id}}
-                    response = agent_executor.invoke(
-                        {"messages": [system_message,
-                                      HumanMessage(content=user_input)]},
-                        config
-                    )["messages"][-1].content
+                        config = {"configurable": {
+                            "thread_id": st.session_state.current_thread_id}}
+                        response = agent_executor.invoke(
+                            {"messages": [system_message,
+                                          HumanMessage(content=user_input)]},
+                            config
+                        )["messages"][-1].content
 
                     st.session_state.messages.append(
                         {"role": "assistant", "content": response})
@@ -147,24 +175,19 @@ def main():
             # Delete conversation button
             if st.button("Xóa lịch sử cuộc hội thoại hiện tại"):
                 try:
-                    config = Config()
-                    from src.handlers.graphrag_handler import HealthcareGraphRAG
-                    graphrag = HealthcareGraphRAG(config)
-                    with graphrag.graph_manager.graph._driver.session() as session:
-                        session.run(
-                            """
-                            MATCH (c:Conversation {thread_id: $thread_id})-[:HAS_MESSAGE]->(m:Message)
-                            DETACH DELETE c, m
-                            """,
-                            {"thread_id": st.session_state.current_thread_id}
-                        )
-                    st.session_state.conversations.remove(
-                        st.session_state.current_thread_id)
-                    st.session_state.current_thread_id = None
-                    st.session_state.messages = []
-                    st.rerun()
+                    if delete_conversation(st.session_state.current_thread_id):
+                        # Nếu xóa thành công, cập nhật UI
+                        st.session_state.conversations.remove(
+                            st.session_state.current_thread_id)
+                        st.session_state.current_thread_id = None
+                        st.session_state.messages = []
+                        st.rerun()
+                    else:
+                        st.error(
+                            "Không thể xóa cuộc hội thoại. Xem log để biết thêm chi tiết.")
                 except Exception as e:
-                    logger.error(f"Error deleting conversation: {str(e)}")
+                    logger.error(
+                        f"Error in UI when deleting conversation: {str(e)}")
                     st.error(f"Đã xảy ra lỗi khi xóa lịch sử: {str(e)}.")
 
         # Tab Memory
@@ -183,15 +206,26 @@ def main():
             st.subheader("Danh sách các cuộc hội thoại")
             if st.session_state.conversations:
                 for thread_id in st.session_state.conversations:
-                    st.write(f"Cuộc hội thoại: {thread_id}")
                     history = get_conversation_history(thread_id)
-                    if history:
-                        for msg in history:
+                    friendly_name = generate_conversation_name(history)
+
+                    # Tạo container có viền và padding
+                    with st.container():
+                        st.markdown(f"### {friendly_name}")
+                        st.caption(f"ID: {thread_id}")
+
+                        if history:
+                            # Chỉ hiển thị 2-3 tin nhắn đầu
+                            for i, msg in enumerate(history[:3]):
+                                st.write(
+                                    f"{msg['role'].capitalize()}: {msg['content'][:50]}...")
+                            if len(history) > 3:
+                                st.caption(
+                                    f"... và {len(history)-3} tin nhắn khác")
+                        else:
                             st.write(
-                                f"{msg['role'].capitalize()}: {msg['content']}")
-                    else:
-                        st.write("Không có lịch sử cho cuộc hội thoại này.")
-                    st.markdown("---")
+                                "Không có lịch sử cho cuộc hội thoại này.")
+                        st.markdown("---")
             else:
                 st.write("Chưa có cuộc hội thoại nào.")
 
