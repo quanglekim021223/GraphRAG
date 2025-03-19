@@ -144,10 +144,19 @@ def main():
 
                 try:
                     with st.spinner('Đang xử lý câu hỏi của bạn...'):
-                        system_message = SystemMessage(content="""
+                        # Lấy context đầy đủ từ lịch sử hội thoại
+                        conversation_context = agent_initializer.get_conversation_context(
+                            st.session_state.current_thread_id)
+
+                        system_message = SystemMessage(content=f"""
                         You are a healthcare assistant. Based on the user's question:
                         - If the question is about specific patient data, diseases, doctor, hospital, insurance provider, room or treatments, use the 'rag_tool'.
                         - If the question is general or no specific data is needed, use the 'llm_tool'.
+                        
+                        {conversation_context}
+                        
+                        When responding to the user, reference information from previous parts of the conversation when relevant.
+                        You have a complete memory of the conversation history and should maintain continuity.
                         """)
 
                         config = {"configurable": {
@@ -191,15 +200,27 @@ def main():
                     st.error(f"Đã xảy ra lỗi khi xóa lịch sử: {str(e)}.")
 
         # Tab Memory
+        # Cải thiện tab Memory trong UI
         with tab2:
-            st.subheader("Memory Preview (based on current conversation)")
-            if st.session_state.messages:
-                st.write("Memory content for current conversation:")
-                for msg in st.session_state.messages:
-                    st.write(f"{msg['role'].capitalize()}: {msg['content']}")
+            st.subheader("Bộ nhớ hội thoại")
+            if st.session_state.current_thread_id:
+                memory = agent_initializer.get_memory(
+                    st.session_state.current_thread_id)
+                context = memory.get_conversation_context()
+
+                st.markdown("### Lịch sử hội thoại")
+                st.text_area("Nội dung hội thoại", value=context.get("conversation", ""),
+                             height=300, disabled=True)
+
+                st.markdown("### Chủ đề chính")
+                if "topics" in context and context["topics"]:
+                    for topic in context["topics"]:
+                        st.markdown(f"- {topic}")
+                else:
+                    st.write("Chưa có chủ đề nào được nhận diện.")
             else:
-                st.write(
-                    "No memory content available in the current conversation.")
+                st.info(
+                    "Vui lòng chọn hoặc tạo một cuộc hội thoại để xem thông tin bộ nhớ.")
 
         # Tab Conversations
         with tab3:
