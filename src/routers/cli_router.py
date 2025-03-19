@@ -1,11 +1,20 @@
-from src.config.settings import Config
-from src.helpers.logging_config import logger
-from langgraph.checkpoint.memory import MemorySaver
-from langgraph.prebuilt import create_react_agent
-from langchain_openai import ChatOpenAI
-from langchain_core.messages import SystemMessage, HumanMessage
-from src.helpers.agent_initializer import agent_initializer
+"""
+CLI Router module for Healthcare GraphRAG system.
+
+This module provides a command-line interface for interacting with the Healthcare GraphRAG system,
+allowing users to ask questions and receive responses in a terminal environment.
+It maintains conversation history within a session using a thread ID.
+"""
+import re
 import uuid
+
+from langchain_core.messages import SystemMessage, HumanMessage
+
+from src.config.settings import Config
+from src.helpers.agent_initializer import agent_initializer
+from src.helpers.logging_config import logger
+from src.helpers.tools import get_last_query
+from src.helpers.prompts import get_healthcare_system_prompt
 
 
 def run_cli():
@@ -29,12 +38,9 @@ def run_cli():
             break
 
         try:
-            # Use only the agent approach with both tools
-            system_message = SystemMessage(content="""
-                You are a healthcare assistant. Based on the user's question:
-                - If the question is about specific patient data, diseases, doctor, hospital, insurance provider, room or treatments, use the 'rag_tool'.
-                - If the question is general or no specific data is needed, use the 'llm_tool'.
-            """)
+            # Sử dụng prompt chung từ helpers/prompts.py
+            system_content = get_healthcare_system_prompt()
+            system_message = SystemMessage(content=system_content)
 
             # Provide thread_id in configurable
             config_obj = {"configurable": {"thread_id": session_thread_id}}
@@ -49,18 +55,14 @@ def run_cli():
             agent_response = full_response["messages"][-1].content
             print(f"\n🔍 Response: {agent_response}")
 
-            # Try to display query info if available in the agent logs
-            if "logs" in full_response:
-                import re
-                log_text = full_response.get("logs", "")
-                match = re.search(r"MATCH\s+.*RETURN.*",
-                                  log_text, re.IGNORECASE | re.DOTALL)
-                if match:
-                    query_info = match.group(0)
-                    print(f"\n📊 Cypher Query: {query_info}")
+            # Try to display query info if available
+            query_info = get_last_query()
+            if query_info:
+                print(f"\n📊 Cypher Query: {query_info}")
 
-        except Exception as e:
-            logger.error(f"Error processing question: {str(e)}")
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            # Broad exception catch is necessary here as CLI entry point
+            logger.error("Error processing question: %s", str(e))
             print(f"Error: {str(e)}")
 
 

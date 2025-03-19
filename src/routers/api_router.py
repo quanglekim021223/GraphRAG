@@ -1,20 +1,30 @@
-# src/routers/api_router.py
+"""
+API Router module for Healthcare GraphRAG system.
 
-import re
+This module provides FastAPI endpoints for interacting with the Healthcare GraphRAG system,
+including chat functionality and persistent conversation history across sessions.
+"""
 import uuid
+from typing import Optional
+
+import uvicorn
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-import uvicorn
-from typing import Optional
 from langchain_core.messages import SystemMessage, HumanMessage
 from src.helpers.agent_initializer import agent_initializer
 from src.config.settings import Config
 from src.helpers.logging_config import logger
 from src.helpers.tools import get_last_query
-# Bổ sung class mô tả payload request
+from src.helpers.prompts import get_healthcare_system_prompt
 
 
 class ChatRequest(BaseModel):
+    """
+    Request payload model for chat interactions.
+
+    Contains the user's question and an optional thread ID for conversation continuity.
+    If thread_id is not provided, a new one will be generated.
+    """
     question: str
     thread_id: Optional[str] = None
 
@@ -43,12 +53,9 @@ def create_app():
             raise HTTPException(status_code=400, detail="Question is required")
 
         try:
-            # SystemMessage
-            system_message = SystemMessage(content="""
-                You are a healthcare assistant. Based on the user's question:
-                - If the question is about specific patient data, diseases, doctor, hospital, insurance provider, room or treatments, use the 'rag_tool'.
-                - If the question is general or no specific data is needed, use the 'llm_tool'.
-            """)
+            # Sử dụng prompt chung từ helpers/prompts.py
+            system_content = get_healthcare_system_prompt()
+            system_message = SystemMessage(content=system_content)
 
             # Truyền thread_id vào config
             config_obj = {"configurable": {"thread_id": thread_id}}
@@ -73,8 +80,8 @@ def create_app():
             }
 
         except Exception as e:
-            logger.error(f"API error: {str(e)}", exc_info=True)
-            raise HTTPException(status_code=500, detail=str(e))
+            logger.error("API error: %s", str(e), exc_info=True)
+            raise HTTPException(status_code=500, detail=str(e)) from e
 
     return app
 

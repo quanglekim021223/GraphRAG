@@ -1,27 +1,51 @@
-from typing import Dict, Any, Optional
+"""
+LLM Manager module for Healthcare GraphRAG system.
+
+This module handles interactions with OpenAI language models, including query generation,
+validation, and response formatting. It serves as the interface between the application
+and external AI services, providing error handling and prompt templating.
+"""
+from typing import Dict, Any
 import re
 from openai import OpenAI, OpenAIError
 from langchain.prompts import PromptTemplate
 from src.helpers.logging_config import logger
-from src.config.settings import Config
 
 
 class LLMManager:
     """Manages interactions with the language model."""
 
-    def __init__(self, config, *args, **kwargs):
-        """Initialize the LLM manager with configuration."""
+    def __init__(self, config):
+        """
+        Initialize the LLM manager with configuration.
+
+        Args:
+            config: Configuration object containing API endpoints and keys
+        """
         self.config = config
         try:
             self.llm = OpenAI(base_url=config.endpoint,
                               api_key=config.github_token)
             logger.info("OpenAI client initialized successfully.")
         except OpenAIError as e:
-            logger.error(f"OpenAI initialization failed: {str(e)}")
-            raise ValueError(f"Failed to initialize OpenAI client: {str(e)}")
+            logger.error("OpenAI initialization failed: %s", str(e))
+            raise ValueError(
+                f"Failed to initialize OpenAI client: {str(e)}") from e
 
     def generate_cypher_query(self, question: str, schema: Dict[str, Any]) -> str:
-        """Generate a Cypher query from a natural language question."""
+        """
+        Generate a Cypher query from a natural language question.
+
+        Args:
+            question: User's natural language question
+            schema: Neo4j database schema
+
+        Returns:
+            Generated Cypher query string
+
+        Raises:
+            ValueError: If query generation fails
+        """
         prompt = PromptTemplate(
             input_variables=["schema", "question"],
             template="""
@@ -52,14 +76,27 @@ class LLMManager:
             )
             query = response.choices[0].message.content.strip()
             query = re.sub(r"```cypher|```", "", query).strip()
-            logger.info(f"Generated Cypher query: {query}")
+            logger.info("Generated Cypher query: %s", query)
             return query
         except OpenAIError as e:
-            logger.error(f"Failed to generate Cypher query: {str(e)}")
-            raise ValueError(f"Cypher query generation failed: {str(e)}")
+            logger.error("Failed to generate Cypher query: %s", str(e))
+            raise ValueError(
+                f"Cypher query generation failed: {str(e)}") from e
 
     def validate_cypher_query(self, query: str, schema: Dict[str, Any]) -> str:
-        """Validate a Cypher query."""
+        """
+        Validate a Cypher query.
+
+        Args:
+            query: Cypher query to validate
+            schema: Neo4j database schema
+
+        Returns:
+            The validated query if valid
+
+        Raises:
+            ValueError: If query validation fails
+        """
         prompt = PromptTemplate(
             input_variables=["schema", "query"],
             template="""
@@ -88,15 +125,28 @@ class LLMManager:
             )
             result = response.choices[0].message.content.strip()
             if not result.startswith("VALID"):
-                logger.warning(f"Invalid Cypher query detected: {result}")
+                logger.warning("Invalid Cypher query detected: %s", result)
                 raise ValueError(f"Invalid Cypher query: {result}")
             return query
         except OpenAIError as e:
-            logger.error(f"Failed to validate Cypher query: {str(e)}")
-            raise ValueError(f"Cypher query validation failed: {str(e)}")
+            logger.error("Failed to validate Cypher query: %s", str(e))
+            raise ValueError(
+                f"Cypher query validation failed: {str(e)}") from e
 
     def generate_response(self, question: str, query_result: Any) -> str:
-        """Generate a natural language response from query results."""
+        """
+        Generate a natural language response from query results.
+
+        Args:
+            question: Original user question
+            query_result: Results from Neo4j database query
+
+        Returns:
+            Natural language response
+
+        Raises:
+            ValueError: If response generation fails
+        """
         prompt = PromptTemplate(
             input_variables=["question", "result"],
             template="""
@@ -124,8 +174,8 @@ class LLMManager:
                 model=self.config.model_name
             )
             response_text = response.choices[0].message.content.strip()
-            logger.info(f"Generated response text: {response_text}")
+            logger.info("Generated response text: %s", response_text)
             return response_text
         except OpenAIError as e:
-            logger.error(f"Failed to generate response: {str(e)}")
-            raise ValueError(f"Response generation failed: {str(e)}")
+            logger.error("Failed to generate response: %s", str(e))
+            raise ValueError(f"Response generation failed: {str(e)}") from e

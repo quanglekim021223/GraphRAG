@@ -1,3 +1,10 @@
+"""
+Configuration module for Healthcare GraphRAG system.
+
+This module manages configuration settings loaded from environment variables,
+implements a Singleton pattern for configuration access, and validates required
+environment variables. It also configures LangChain tracing for observability.
+"""
 import os
 from dataclasses import dataclass
 from dotenv import load_dotenv
@@ -23,7 +30,8 @@ class Config:
             cls._instance = super(Config, cls).__new__(cls)
         return cls._instance
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self):
+        """Initialize configuration if not already initialized."""
         # Ngăn chặn khởi tạo lại nếu đã tồn tại
         if not hasattr(self, '_initialized'):
             self.github_token = os.getenv("GITHUB_TOKEN", "")

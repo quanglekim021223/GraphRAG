@@ -1,8 +1,14 @@
+"""
+Memory Manager module for Healthcare GraphRAG system.
+
+This module implements conversation memory components using Neo4j as a persistent
+storage backend. It provides classes for history management, topic extraction,
+and conversation context formatting for the AI agent system.
+"""
 from typing import Dict, List, Any, Optional
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.chat_history import BaseChatMessageHistory
 from src.handlers.conversation_handler import get_conversation_history
-from src.helpers.logging_config import logger
 
 
 class Neo4jChatMessageHistory(BaseChatMessageHistory):
@@ -119,7 +125,7 @@ class ConversationBufferMemory:
                         age_num = ''.join(filter(str.isdigit, age_text))
                         if age_num:
                             topics.add(f"user's age: {age_num}")
-                    except:
+                    except Exception:  # Thay bare except bằng Exception
                         pass
 
         return list(topics)
