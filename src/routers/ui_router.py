@@ -15,6 +15,16 @@ from src.handlers.conversation_handler import store_conversation, get_conversati
 
 def main():
     """Main Streamlit application."""
+    # Cấu hình động cho tiêu đề trang dựa trên thread_id hiện tại
+    thread_id_display = "New Chat"
+    if "current_thread_id" in st.session_state and st.session_state.current_thread_id:
+        thread_id_display = f"Thread: {st.session_state.current_thread_id[:8]}..."
+
+    st.set_page_config(
+        page_title=f"Healthcare GraphRAG - {thread_id_display}",
+        page_icon="🏥",
+        layout="wide"
+    )
     # Enable nested event loops for asyncio
     nest_asyncio.apply()
     loop = asyncio.new_event_loop()
@@ -77,11 +87,15 @@ def main():
                 st.session_state.conversations.append(new_thread_id)
                 st.session_state.current_thread_id = new_thread_id
                 st.session_state.messages = []
+                # Buộc tải lại trang để cập nhật tiêu đề tab
+                st.rerun()
             else:
                 if st.session_state.current_thread_id != selected_conversation:
                     st.session_state.current_thread_id = selected_conversation
                     st.session_state.messages = get_conversation_history(
                         selected_conversation)
+                    # Buộc tải lại trang để cập nhật tiêu đề tab
+                    st.rerun()
 
             # Display conversation history
             st.subheader("Lịch sử hội thoại")

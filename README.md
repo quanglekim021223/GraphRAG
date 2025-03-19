@@ -58,6 +58,6 @@ Healthcare GraphRAG là một ứng dụng theo mô hình kiến trúc phân l�
 ## 🎬 Demo
 
 ### Giao diện Streamlit
-![Streamlit UI Demo](assets/images/Screenshot1.png)
+![Streamlit UI Demo](assets/images/1.png)
 
 ### Ví dụ hội thoại

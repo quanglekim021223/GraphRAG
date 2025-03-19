@@ -27,21 +27,27 @@ def rag_tool(question: str) -> str:
     try:
         result = graphrag_instance.run(question)
         logger.info(f"Raw GraphRAG result: {result}")
-        # Lưu query để truy xuất sau này
-        if "query" in result and result["query"]:
+
+        # Lưu query nếu có
+        if isinstance(result, dict) and "query" in result:
             set_last_query(result["query"])
+
+        # Xử lý response
         if isinstance(result, dict) and "response" in result:
             response = result["response"]
-            if response and "No information found" not in response and "Error" not in response:
-                if isinstance(response, list):
-                    return "\n".join(str(item) for item in response) if response else "No data available"
-                elif isinstance(response, str):
-                    return response
-                else:
-                    return str(response)
+
+            # Kiểm tra response có hợp lệ
+            if response and not any(msg in str(response) for msg in ["No information found", "Error"]):
+                # Format response dựa vào kiểu dữ liệu
+                return "\n".join(str(item) for item in response) if isinstance(response, list) else str(response)
+
+            # Fallback to query if response is invalid
             if "query" in result and result["query"]:
-                return "\n".join(str(item) for item in result["query"]) if result["query"] else "No data available"
-            return response if response else "No information found"
+                return str(result["query"])
+
+            # Return whatever response we have
+            return str(response) if response else "No information found"
+
         return "No information found"
     except Exception as e:
         logger.error(f"GraphRAG error: {str(e)}")
