@@ -1,88 +1,91 @@
-from flask import Flask, request, jsonify
-from src.config.settings import Config
-from src.helpers.logging_config import logger
-from langgraph.checkpoint.memory import MemorySaver
-from langgraph.prebuilt import create_react_agent
-from langchain_openai import ChatOpenAI
+# src/routers/api_router.py
+
+import re
+import uuid
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+import uvicorn
+from typing import Optional
 from langchain_core.messages import SystemMessage, HumanMessage
 from src.helpers.agent_initializer import agent_initializer
-import uuid
-import re
+from src.config.settings import Config
+from src.helpers.logging_config import logger
+
+# Bổ sung class mô tả payload request
+
+
+class ChatRequest(BaseModel):
+    question: str
+    thread_id: Optional[str] = None
 
 
 def create_app():
-    """Create and configure the Flask application."""
-    app = Flask(__name__)
+    """Tạo app FastAPI, khởi tạo agent và đăng ký các endpoint."""
+    app = FastAPI(title="Healthcare GraphRAG API")
 
-    # Load configuration
+    # Load config
     config = Config()
     config.validate()
 
-    # Initialize ReAct agent with both tools
+    # Khởi tạo ReAct agent
     agent_executor = agent_initializer.get_agent()
 
-    @app.route('/', methods=['GET'])
-    def home():
-        return "Welcome to the Healthcare GraphRAG chatbot!"
+    @app.get("/")
+    async def home():
+        return {"message": "Welcome to the Healthcare GraphRAG chatbot (FastAPI)!"}
 
-    @app.route('/chat', methods=['POST'])
-    def chat():
-        data = request.json
-        question = data.get('question')
-        # Use provided thread_id or generate new one
-        thread_id = data.get('thread_id', str(uuid.uuid4()))
+    @app.post("/chat")
+    async def chat(request_body: ChatRequest):
+        question = request_body.question
+        thread_id = request_body.thread_id or str(uuid.uuid4())
 
         if not question:
-            return jsonify({"error": "Question is required"}), 400
+            raise HTTPException(status_code=400, detail="Question is required")
 
         try:
-            # Use only the agent approach
+            # SystemMessage
             system_message = SystemMessage(content="""
                 You are a healthcare assistant. Based on the user's question:
                 - If the question is about specific patient data, diseases, doctor, hospital, insurance provider, room or treatments, use the 'rag_tool'.
                 - If the question is general or no specific data is needed, use the 'llm_tool'.
             """)
 
-            # Provide thread_id in configurable
+            # Truyền thread_id vào config
             config_obj = {"configurable": {"thread_id": thread_id}}
 
-            # Invoke agent and get full response
-            full_response = agent_executor.invoke(
+            # Gọi agent
+            full_response = await agent_executor.ainvoke(
                 {"messages": [system_message, HumanMessage(content=question)]},
                 config_obj
             )
 
-            # Extract the response content
+            # Lấy content trả về
             agent_response = full_response["messages"][-1].content
 
-            # Try to extract query information from the agent logs
+            # Cố gắng trích xuất câu lệnh Cypher (nếu có)
             query_info = None
             if "logs" in full_response:
-                # Look for Cypher query in the logs
-                log_text = full_response.get("logs", "")
+                log_text = full_response["logs"]
                 match = re.search(r"MATCH\s+.*RETURN.*",
                                   log_text, re.IGNORECASE | re.DOTALL)
                 if match:
                     query_info = match.group(0)
 
-            return jsonify({
+            return {
                 "question": question,
                 "response": agent_response,
                 "query": query_info,
-                "thread_id": thread_id  # Return the thread_id for future requests
-            })
+                "thread_id": thread_id
+            }
+
         except Exception as e:
-            logger.error(f"API error: {str(e)}")
-            return jsonify({"error": str(e)}), 500
+            logger.error(f"API error: {str(e)}", exc_info=True)
+            raise HTTPException(status_code=500, detail=str(e))
 
     return app
 
 
 def run_api(port=5000):
-    """Run the Flask application."""
+    """Hàm chạy server FastAPI bằng uvicorn, thay vì Flask."""
     app = create_app()
-    app.run(host='0.0.0.0', port=port)
-
-
-if __name__ == "__main__":
-    run_api()
+    uvicorn.run(app, host="0.0.0.0", port=port)

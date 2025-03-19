@@ -5,6 +5,7 @@ from src.handlers.graphrag_handler import HealthcareGraphRAG
 from src.helpers.llm_initializer import get_llm
 
 graphrag_instance = HealthcareGraphRAG()
+llm = get_llm()
 
 
 @tool
@@ -35,7 +36,7 @@ def rag_tool(question: str) -> str:
 def llm_tool(question: str) -> str:
     """Use this tool to provide general medical knowledge or when specific data is not available."""
     try:
-        llm = get_llm()
+
         general_prompt = (
             f"You are a healthcare assistant. User asked: '{question}'. No specific data was found in the database. "
             "Provide a general answer based on common medical knowledge and append a follow-up question "

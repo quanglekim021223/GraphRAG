@@ -27,9 +27,11 @@ Healthcare GraphRAG là một hệ thống chatbot thông minh kết hợp cơ s
 - **Cơ chế ReAct Agent**: Lựa chọn thông minh giữa RAG và LLM tùy theo loại câu hỏi
 - **Đa ngữ**: Hỗ trợ tiếng Việt và tiếng Anh
 - **Lưu trữ hội thoại**: Lưu và quản lý các cuộc hội thoại trong cơ sở dữ liệu Neo4j
-- **Đa nền tảng**: Giao diện web (Streamlit), API (Flask) và CLI
+- **Đa nền tảng**: Giao diện web (Streamlit), API (FastAPI) và CLI
 - **Hệ thống bộ nhớ**: Duy trì ngữ cảnh và lịch sử hội thoại
 - **Giải thích lý luận**: Hiển thị quá trình suy luận thông qua các truy vấn Cypher
+## **System Architecture**
+![System Architecture](./Users/quanglekim/Downloads/repo_final/assets/images/graphrag.png)
 
 ## 🏗 Kiến trúc hệ thống
 
@@ -37,7 +39,7 @@ Healthcare GraphRAG là một ứng dụng theo mô hình kiến trúc phân l�
 
 1. **Lớp giao diện người dùng**: 
    - Giao diện web tương tác (Streamlit)
-   - API RESTful (Flask) 
+   - API RESTful (FastAPI) 
    - Giao diện dòng lệnh (CLI)
 
 2. **Lớp xử lý**:
@@ -56,6 +58,6 @@ Healthcare GraphRAG là một ứng dụng theo mô hình kiến trúc phân l�
 ## 🎬 Demo
 
 ### Giao diện Streamlit
-![Streamlit UI Demo](https://github.com/username/healthcare-graphrag/raw/main/docs/images/streamlit_demo.png)
+![Streamlit UI Demo](./Users/quanglekim/Downloads/repo_final/assets/images/Screenshot1.png)
 
 ### Ví dụ hội thoại
