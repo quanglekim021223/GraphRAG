@@ -31,7 +31,7 @@ Healthcare GraphRAG là một hệ thống chatbot thông minh kết hợp cơ s
 - **Hệ thống bộ nhớ**: Duy trì ngữ cảnh và lịch sử hội thoại
 - **Giải thích lý luận**: Hiển thị quá trình suy luận thông qua các truy vấn Cypher
 ## **System Architecture**
-![System Architecture](./Users/quanglekim/Downloads/repo_final/assets/images/graphrag.png)
+![System Architecture](assets/images/graphrag.png)
 
 ## 🏗 Kiến trúc hệ thống
 
@@ -58,6 +58,6 @@ Healthcare GraphRAG là một ứng dụng theo mô hình kiến trúc phân l�
 ## 🎬 Demo
 
 ### Giao diện Streamlit
-![Streamlit UI Demo](./Users/quanglekim/Downloads/repo_final/assets/images/Screenshot1.png)
+![Streamlit UI Demo](assets/images/Screenshot1.png)
 
 ### Ví dụ hội thoại
