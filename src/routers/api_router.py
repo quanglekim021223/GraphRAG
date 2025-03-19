@@ -10,7 +10,7 @@ from langchain_core.messages import SystemMessage, HumanMessage
 from src.helpers.agent_initializer import agent_initializer
 from src.config.settings import Config
 from src.helpers.logging_config import logger
-
+from src.helpers.tools import get_last_query
 # Bổ sung class mô tả payload request
 
 
@@ -62,14 +62,8 @@ def create_app():
             # Lấy content trả về
             agent_response = full_response["messages"][-1].content
 
-            # Cố gắng trích xuất câu lệnh Cypher (nếu có)
-            query_info = None
-            if "logs" in full_response:
-                log_text = full_response["logs"]
-                match = re.search(r"MATCH\s+.*RETURN.*",
-                                  log_text, re.IGNORECASE | re.DOTALL)
-                if match:
-                    query_info = match.group(0)
+            # Trích xuất Cypher query từ rag_tool nếu có
+            query_info = get_last_query()
 
             return {
                 "question": question,

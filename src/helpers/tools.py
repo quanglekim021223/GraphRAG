@@ -7,6 +7,19 @@ from src.helpers.llm_initializer import get_llm
 graphrag_instance = HealthcareGraphRAG()
 llm = get_llm()
 
+# Thêm biến toàn cục ở đầu file
+_last_query = None
+
+
+def get_last_query():
+    global _last_query
+    return _last_query
+
+
+def set_last_query(query):
+    global _last_query
+    _last_query = query
+
 
 @tool
 def rag_tool(question: str) -> str:
@@ -14,6 +27,9 @@ def rag_tool(question: str) -> str:
     try:
         result = graphrag_instance.run(question)
         logger.info(f"Raw GraphRAG result: {result}")
+        # Lưu query để truy xuất sau này
+        if "query" in result and result["query"]:
+            set_last_query(result["query"])
         if isinstance(result, dict) and "response" in result:
             response = result["response"]
             if response and "No information found" not in response and "Error" not in response:
