@@ -1,0 +1,23 @@
+# API và Web Framework
+fastapi>=0.104.0
+uvicorn>=0.23.2
+streamlit>=1.28.0
+pydantic>=2.4.2
+
+# Neo4j Integration
+neo4j>=5.13.0
+langchain-neo4j>=0.1.3
+
+# Azure OpenAI và LLM
+openai>=1.3.0
+langchain-core>=0.1.0
+langchain-openai>=0.0.5
+langgraph>=0.0.17
+langsmith>=0.0.60
+
+# Công cụ và tiện ích
+python-dotenv>=1.0.0
+nest-asyncio>=1.5.8
+
+# Logging và monitoring
+python-logging-loki>=0.3.1  # Tùy chọn nếu bạn muốn tích hợp Grafana Loki
