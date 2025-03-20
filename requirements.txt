@@ -20,4 +20,4 @@ python-dotenv>=1.0.0
 nest-asyncio>=1.5.8
 
 # Logging và monitoring
-python-logging-loki>=0.3.1  # Tùy chọn nếu bạn muốn tích hợp Grafana Loki
+python-logging-loki>=0.3.1 
