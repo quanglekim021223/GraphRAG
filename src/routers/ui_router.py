@@ -82,6 +82,8 @@ def render_conversation_selector():
         st.session_state.conversations.append(new_thread_id)
         st.session_state.current_thread_id = new_thread_id
         st.session_state.messages = []
+        # Update URL with new thread_id
+        st.query_params.update(thread_id=new_thread_id)
         return True
     else:
         selected_thread_id = conversation_map[selected_option]
@@ -89,6 +91,8 @@ def render_conversation_selector():
             st.session_state.current_thread_id = selected_thread_id
             st.session_state.messages = get_conversation_history(
                 selected_thread_id)
+            # Update URL with selected thread_id
+            st.query_params.update(thread_id=selected_thread_id)
             return True
 
     return False
@@ -199,6 +203,13 @@ def main():
     """Main Streamlit application."""
     # Cấu hình động cho tiêu đề trang dựa trên thread_id hiện tại
     thread_id_display = "New Chat"
+    query_params = st.query_params
+    if "thread_id" in query_params:
+        thread_id = query_params["thread_id"]
+        if "current_thread_id" not in st.session_state or st.session_state.current_thread_id != thread_id:
+            st.session_state.current_thread_id = thread_id
+            st.session_state.messages = get_conversation_history(thread_id)
+
     if "current_thread_id" in st.session_state and st.session_state.current_thread_id:
         thread_id_display = f"Thread: {st.session_state.current_thread_id[:8]}..."
 

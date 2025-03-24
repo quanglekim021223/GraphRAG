@@ -41,7 +41,7 @@ def create_app():
     agent_executor = agent_initializer.get_agent()
 
     @app.get("/")
-    async def home():
+    def home():
         return {"message": "Welcome to the Healthcare GraphRAG chatbot (FastAPI)!"}
 
     @app.post("/chat")
