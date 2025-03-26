@@ -172,3 +172,4 @@ cython_debug/
 
 # PyPI configuration file
 .pypircbackup/neo4j.dump
+backup/neo4j.dump
