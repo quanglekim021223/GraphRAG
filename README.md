@@ -28,8 +28,8 @@ Healthcare GraphRAG là một hệ thống chatbot thông minh kết hợp cơ s
 - **Đa nền tảng**: Giao diện web (Streamlit), API (FastAPI) và CLI
 - **Hệ thống bộ nhớ**: Duy trì ngữ cảnh và lịch sử hội thoại
 - **Giải thích lý luận**: Hiển thị quá trình suy luận thông qua các truy vấn Cypher
-## **System Architecture**
-![System Architecture](assets/images/graphrag.png)
+## **Kiến trúc hệ thốnge**
+![Kiến trúc hệ thống](assets/images/graphrag.png)
 
 ## 🏗 Kiến trúc hệ thống
 
@@ -103,6 +103,19 @@ Healthcare GraphRAG là một ứng dụng theo mô hình kiến trúc phân l�
    - Neo4j Graph Database (dữ liệu y tế và lịch sử hội thoại)
    - Azure OpenAI (Mô hình ngôn ngữ)
 
+## 📋 Điều kiện tiên quyết
+
+Để chạy dự án này, bạn cần cài đặt các công cụ sau:
+- **Git**: Để clone repository (tải tại [https://git-scm.com/](https://git-scm.com/)).
+- **Python 3.9+**: Đảm bảo bạn đã cài Python (tải tại [https://www.python.org/](https://www.python.org/)).
+- **Docker**: Cần thiết nếu bạn muốn chạy qua Docker (tải tại [https://www.docker.com/](https://www.docker.com/)).
+- **Docker Compose**: Đi kèm với Docker Desktop trên Windows/Mac, hoặc cài riêng trên Linux.
+
+### Cấu hình môi trường
+Sao chép file `.env.example` thành `.env` và điền các giá trị:
+- `NEO4J_PASSWORD`: Đặt mật khẩu bất kỳ cho Neo4j (ví dụ: `password123`).
+- `LANGCHAIN_API_KEY`: Lấy từ [LangSmith](https://smith.langchain.com/) sau khi đăng ký.
+- `GITHUB_TOKEN`: Tạo từ [GitHub Settings](https://github.com/settings/tokens) nếu cần.
 ## Setup
 
 1. Clone the repository
@@ -123,8 +136,13 @@ Healthcare GraphRAG là một ứng dụng theo mô hình kiến trúc phân l�
     conda create -n healthcare-graphrag python=3.9
     conda activate healthcare-graphrag
     ```
+3. Install dependencies:
 
-3. Download file dump Neo4j
+    ```bash
+    pip install -r requirements.txt
+    ```
+
+4. Download file dump Neo4j
     ```bash
     wget https://mega.nz/file/grA1SaKJ#AzeKD25EmC09aKqKsb0jmGpQYrX3hR6gZqafXqQHjq4 -O backup/neo4j.dump
     ```
@@ -186,6 +204,24 @@ docker-compose exec neo4j cypher-shell -u $NEO4J_USERNAME -p $NEO4J_PASSWORD "MA
 - **Neo4j Browser**: http://localhost:7474 (đăng nhập với thông tin từ file .env)
 - **Streamlit UI**: http://localhost:8501
 - **FastAPI**: http://localhost:5000 (hoặc cổng đã cấu hình trong .env)
+
+- **Streamlit**: Giao diện web tương tác để trò chuyện với chatbot.
+- **FastAPI**: API RESTful để tích hợp chatbot vào ứng dụng khác.
+- **CLI**: Giao diện dòng lệnh để sử dụng nhanh qua terminal.
+
+## Hướng dẫn chạy non-Docker
+- **Để chạy Streamlit UI**: 
+```bash
+python main --mode streamlit
+```
+- **Để chạy FastAPI API**: 
+```bash
+python main --mode api
+```
+- **Để chạy CLI**: 
+```bash
+python main --mode cli
+```
 
 ### Giao diện Streamlit
 ![Streamlit UI Demo](assets/images/1.png)
