@@ -15,11 +15,9 @@ Healthcare GraphRAG là một hệ thống chatbot thông minh kết hợp cơ s
 
 - [Tính năng nổi bật](#-tính-năng-nổi-bật)
 - [Kiến trúc hệ thống](#-kiến-trúc-hệ-thống)
-- [Demo](#-demo)
 - [Cài đặt và triển khai](#-cài-đặt-và-triển-khai)
 - [Giao diện sử dụng](#-giao-diện-sử-dụng)
 - [Cấu trúc dự án](#-cấu-trúc-dự-án)
-- [Công nghệ sử dụng](#-công-nghệ-sử-dụng)
 
 ## ✨ Tính năng nổi bật
 
@@ -35,6 +33,56 @@ Healthcare GraphRAG là một hệ thống chatbot thông minh kết hợp cơ s
 
 ## 🏗 Kiến trúc hệ thống
 
+```plaintext
+healthcare-graphrag/
+├── .env                       # Biến môi trường (Neo4j, API keys)
+├── .env.example               # Mẫu biến môi trường
+├── .gitignore                 # Cấu hình Git ignore
+├── schema.cypher              # Define Schema
+├── docker-compose.yml         # Cấu hình Docker Compose (Neo4j, API, UI, CLI)
+├── docker-entrypoint.sh       # Script khởi động cho containers
+├── Dockerfile                 # Cấu hình build image Docker
+├── main.py                    # Điểm khởi chạy chính của ứng dụng
+├── README.md                  # Tài liệu dự án
+├── requirements.txt           # Dependencies Python
+│
+├── assets/                    # Tài nguyên tĩnh
+│   └── images/                # Hình ảnh cho tài liệu và UI
+│       ├── 1.png
+│       └── graphrag.png
+│
+├── backup/                    # Thư mục chứa file dump Neo4j
+│   └── neo4j.dump             # File dump cơ sở dữ liệu Neo4j
+│
+├── data/                      # Dữ liệu nguồn
+│   └── healthcare.csv         # Dữ liệu y tế dạng CSV
+│
+├── neo4j/                     # Cấu hình Neo4j
+│   └── entrypoint.sh          # Script khởi động cấu hình Neo4j
+│
+└── src/                       # Mã nguồn chính
+    ├── config/                # Cấu hình ứng dụng
+    │   ├── settings.py        # Cài đặt cấu hình chính
+    │   └── __pycache__/
+    │
+    ├── handlers/              # Xử lý logic nghiệp vụ
+    │   ├── conversation_handler.py   # Quản lý hội thoại
+    │   ├── graph_manager.py          # Xử lý đồ thị Neo4j
+    │   ├── graphrag_handler.py       # Xử lý GraphRAG
+    │   ├── llm_manager.py            # Quản lý LLM
+    │   ├── memory_manager.py         # Quản lý bộ nhớ
+    │   └── __pycache__/
+    │
+    ├── helpers/               # Tiện ích hỗ trợ
+    │   ├── agent_initializer.py      # Khởi tạo ReAct Agent
+    │   ├── llm_initializer.py        # Khởi tạo LLM
+    │   └── ...
+    │
+    └── routers/               # Các giao diện người dùng
+        ├── api_router.py       # Giao diện FastAPI
+        ├── cli_router.py       # Giao diện dòng lệnh
+        └── ui_router.py        # Giao diện Streamlit
+```
 Healthcare GraphRAG là một ứng dụng theo mô hình kiến trúc phân lớp với các thành phần chính:
 
 1. **Lớp giao diện người dùng**: 
@@ -55,9 +103,108 @@ Healthcare GraphRAG là một ứng dụng theo mô hình kiến trúc phân l�
    - Neo4j Graph Database (dữ liệu y tế và lịch sử hội thoại)
    - Azure OpenAI (Mô hình ngôn ngữ)
 
-## 🎬 Demo
+## Setup
+
+1. Clone the repository
+    ```bash
+    git clone https://github.com/quanglekim021223/GraphRAG.git
+    cd healthcare-graphrag
+    ```
+2. Create a virtual environment (choose one method):
+
+    Using venv:
+    ```bash
+    python -m venv venv
+    source venv/bin/activate  # On Windows: venv\Scripts\activate
+    ```
+
+    Using conda:
+    ```bash
+    conda create -n healthcare-graphrag python=3.9
+    conda activate healthcare-graphrag
+    ```
+
+3. Download file dump Neo4j
+    ```bash
+    wget https://mega.nz/file/grA1SaKJ#AzeKD25EmC09aKqKsb0jmGpQYrX3hR6gZqafXqQHjq4 -O backup/neo4j.dump
+    ```
+## Cấu hình môi trường
+
+Tạo file `.env` với nội dung sau:
+```bash
+NEO4J_URI=bolt://localhost:7689
+NEO4J_USERNAME=neo4j
+NEO4J_PASSWORD=your_password_here
+
+# LangSmith tracing
+LANGCHAIN_TRACING_V2=true
+LANGCHAIN_PROJECT=HealthcareGraphRAG
+LANGCHAIN_API_KEY=your_langsmith_api_key_here
+# Logging
+LOG_LEVEL=INFO
+# GitHub token
+GITHUB_TOKEN=your_github_token_here
+```
+
+## 🐳 Hướng dẫn Docker
+Lưu ý quan trọng: Quá trình cần thực hiện 2 bước:
+
+Chạy neo4j-loader để import file dump
+Sau đó chạy neo4j và các service khác
+
+### Bước 1: Import dữ liệu với neo4j-loader
+Bỏ comment phần neo4j-loader trong file docker-compose.yml
+Chạy neo4j-loader để import dữ liệu
+```bash
+docker-compose up neo4j-loader
+```
+
+Đợi cho đến khi thấy thông báo "Database import completed!" và container tự dừng
+
+### Bước 2: Khởi động toàn bộ stack
+Khởi động Neo4j và các service khác
+```bash
+docker-compose up -d
+```
+Đợi khoảng 60 giây để Neo4j khởi động hoàn tất
+
+### Kiểm tra hoạt động
+Kiểm tra các container đang chạy
+```bash
+docker-compose ps
+```
+Xem log của Neo4j
+```bash
+docker-compose logs -f neo4j
+```
+Kiểm tra dữ liệu trong Neo4j
+```bash
+docker-compose exec neo4j cypher-shell -u $NEO4J_USERNAME -p $NEO4J_PASSWORD "MATCH (p:Patient) RETURN count(p) AS PatientCount;"
+```
+
+### Truy cập các dịch vụ
+- **Neo4j Browser**: http://localhost:7474 (đăng nhập với thông tin từ file .env)
+- **Streamlit UI**: http://localhost:8501
+- **FastAPI**: http://localhost:5000 (hoặc cổng đã cấu hình trong .env)
 
 ### Giao diện Streamlit
 ![Streamlit UI Demo](assets/images/1.png)
 
-### Ví dụ hội thoại
+## 🔄 Khắc phục sự cố
+
+### Lỗi kết nối Neo4j
+Nếu gặp lỗi "No node label 'Patient' in the schema":
+
+```bash
+# Chạy script cập nhật schema
+docker-compose exec neo4j cypher-shell -u $NEO4J_USERNAME -p $NEO4J_PASSWORD "CALL db.schema.visualization();"
+docker-compose exec neo4j cypher-shell -u $NEO4J_USERNAME -p $NEO4J_PASSWORD "CALL apoc.meta.schema();"
+```
+
+### Lỗi không tìm thấy file dump
+Kiểm tra đường dẫn file dump trong thư mục backup:
+
+```bash
+ls -la backup/
+docker-compose exec neo4j ls -la /backups
+```
