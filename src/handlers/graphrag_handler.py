@@ -6,10 +6,13 @@ combining Neo4j graph database queries with LLM processing to provide accurate
 healthcare information responses based on structured knowledge graphs.
 """
 from typing import Dict, Any
-from langchain_core.runnables import RunnableLambda, RunnablePassthrough, RunnableSequence
 from langsmith import Client
 from src.helpers.logging_config import logger
 from src.config.settings import Config
+from src.handlers.grounding_verifier import (
+    build_grounded_output,
+    validate_template,
+)
 from src.handlers.graph_manager import GraphManager
 from src.handlers.llm_manager import LLMManager
 
@@ -17,6 +20,7 @@ from src.handlers.llm_manager import LLMManager
 class HealthcareGraphRAG:
     """Main GraphRAG system for healthcare data retrieval and question answering."""
     _instance = None
+    MAX_CYPHER_RETRIES = 2
 
     def __new__(cls, *args, **kwargs):
         if cls._instance is None:
@@ -40,44 +44,31 @@ class HealthcareGraphRAG:
                 logger.warning(
                     "LangSmith client initialization failed: %s", str(e))
 
-            # Khởi tạo pipeline một lần trong __init__
-            self.pipeline = self._create_pipeline()
-
             self._initialized = True
 
-    def _create_pipeline(self) -> RunnableSequence:
-        """
-        Create the GraphRAG processing pipeline.
+    @staticmethod
+    def _clarification_result(query: str, reason: str, attempts: int) -> Dict[str, Any]:
+        """Return a safe response that lets the outer ReAct agent ask the user."""
+        if reason == "empty_result":
+            response = (
+                "Tôi chưa tìm thấy dữ liệu phù hợp. Vui lòng cung cấp thêm "
+                "thông tin định danh như họ tên đầy đủ, mã bệnh nhân, bệnh viện "
+                "hoặc diễn đạt cụ thể hơn mối quan hệ cần tìm."
+            )
+        else:
+            response = (
+                "Tôi chưa thể tạo truy vấn dữ liệu phù hợp sau một số lần thử. "
+                "Vui lòng diễn đạt câu hỏi cụ thể hơn hoặc bổ sung tên, mã định "
+                "danh và mối quan hệ cần tra cứu."
+            )
 
-        Returns:
-            RunnableSequence: The complete GraphRAG pipeline
-        """
-        pipeline = (
-            {"question": RunnablePassthrough(), "schema": RunnableLambda(
-                lambda _: self.schema)}
-            | RunnableLambda(lambda x: {
-                "question": x["question"],
-                "schema": x["schema"],
-                "query": self.llm_manager.generate_cypher_query(x["question"], x["schema"])
-            }).with_config(run_name="GenerateCypherQuery")
-            | RunnableLambda(lambda x: {
-                "question": x["question"],
-                "schema": x["schema"],
-                "query": self.llm_manager.validate_cypher_query(x["query"], x["schema"])
-            }).with_config(run_name="ValidateCypherQuery")
-            | RunnableLambda(lambda x: {
-                "question": x["question"],
-                "schema": x["schema"],
-                "query": x["query"],
-                "result": self.graph_manager.execute_query(x["query"])
-            }).with_config(run_name="ExecuteCypherQuery")
-            | RunnableLambda(lambda x: {
-                "query": x["query"],
-                "result": x["result"],
-                "response": self.llm_manager.generate_response(x["question"], x["result"])
-            }).with_config(run_name="GenerateResponse")
-        )
-        return pipeline
+        return {
+            "status": "needs_clarification",
+            "query": query,
+            "response": response,
+            "reason": reason,
+            "attempts": attempts,
+        }
 
     def run(self, question: str) -> Dict[str, Any]:
         """
@@ -89,17 +80,98 @@ class HealthcareGraphRAG:
         Returns:
             Dict containing the query and response
         """
+        query = None
         try:
-            # Sử dụng pipeline đã khởi tạo thay vì tạo mới
-            result = self.pipeline.invoke(question)
-            logger.info("Successfully processed query: '%s' with result: %s",
-                        question, result)
-            return result
-        except ValueError as e:
-            logger.error("Pipeline failed for '%s': %s", question, str(e))
-            return {"query": None, "response": f"Error: {str(e)}"}
+            generation = self.llm_manager.generate_cypher_query(
+                question, self.schema
+            )
+            query = generation.cypher
+            response_template = generation.response_template
+            if not validate_template(response_template, query):
+                logger.warning(
+                    "Generated response template was rejected; using "
+                    "deterministic rendering"
+                )
+                response_template = None
+
+            for retry_count in range(self.MAX_CYPHER_RETRIES + 1):
+                try:
+                    self.graph_manager.explain_query(query)
+                    query_result = self.graph_manager.execute_query(query)
+                except ValueError as error:
+                    logger.warning(
+                        "Cypher attempt %s/%s failed: %s",
+                        retry_count + 1,
+                        self.MAX_CYPHER_RETRIES + 1,
+                        str(error),
+                    )
+                    if retry_count >= self.MAX_CYPHER_RETRIES:
+                        return self._clarification_result(
+                            query, "max_retries_exceeded", retry_count + 1
+                        )
+
+                    generation = self.llm_manager.repair_cypher_query(
+                        question=question,
+                        schema=self.schema,
+                        invalid_query=query,
+                        diagnostic=str(error),
+                    )
+                    query = generation.cypher
+                    response_template = generation.response_template
+                    if not validate_template(response_template, query):
+                        logger.warning(
+                            "Repaired response template was rejected; using "
+                            "deterministic rendering"
+                        )
+                        response_template = None
+                    continue
+
+                if not query_result:
+                    logger.info("Cypher query returned no records: %s", query)
+                    return self._clarification_result(
+                        query, "empty_result", retry_count + 1
+                    )
+
+                grounded_output = build_grounded_output(
+                    query_result, response_template
+                )
+                if not grounded_output["grounded"]:
+                    logger.warning(
+                        "Response abstained because grounding verification failed: %s",
+                        grounded_output["reason"],
+                    )
+                    return {
+                        "status": "abstained",
+                        "query": query,
+                        "result": query_result,
+                        "response": grounded_output["answer"],
+                        "evidence": [],
+                        "reason": grounded_output["reason"],
+                        "attempts": retry_count + 1,
+                    }
+
+                result = {
+                    "status": "success",
+                    "query": query,
+                    "result": query_result,
+                    "response": grounded_output["answer"],
+                    "evidence": grounded_output["evidence"],
+                    "omitted_fields": grounded_output["omitted_fields"],
+                    "attempts": retry_count + 1,
+                }
+                logger.info(
+                    "Successfully processed query '%s' after %s attempt(s)",
+                    question,
+                    retry_count + 1,
+                )
+                return result
+
+            return self._clarification_result(
+                query, "max_retries_exceeded", self.MAX_CYPHER_RETRIES + 1
+            )
         except Exception as e:  # pylint: disable=broad-exception-caught
-            # This is the top-level error handler for the pipeline, so broad exception is appropriate
             logger.error("Unexpected error in pipeline for '%s': %s",
                          question, str(e), exc_info=True)
-            return {"query": None, "response": f"Error: {str(e)}"}
+            return self._clarification_result(
+                query, "pipeline_error", 1
+            )

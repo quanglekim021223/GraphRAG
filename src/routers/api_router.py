@@ -16,6 +16,7 @@ from src.config.settings import Config
 from src.helpers.logging_config import logger
 from src.helpers.tools import get_last_query
 from src.helpers.prompts import get_healthcare_system_prompt
+from src.handlers.grounding_verifier import select_controlled_agent_response
 
 
 class ChatRequest(BaseModel):
@@ -66,8 +67,8 @@ def create_app():
                 config_obj
             )
 
-            # Lấy content trả về
-            agent_response = full_response["messages"][-1].content
+            # Bypass any ReAct paraphrase when grounded database data was used.
+            agent_response = select_controlled_agent_response(full_response)
 
             # Trích xuất Cypher query từ rag_tool nếu có
             query_info = get_last_query()

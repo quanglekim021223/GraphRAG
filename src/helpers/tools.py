@@ -8,6 +8,7 @@ knowledge database lookups and general medical knowledge responses.
 from langchain_core.tools import tool
 from langchain_core.messages import SystemMessage, HumanMessage
 from src.helpers.logging_config import logger
+from src.handlers.grounding_verifier import format_grounded_response
 from src.handlers.graphrag_handler import HealthcareGraphRAG
 from src.helpers.llm_initializer import get_llm
 
@@ -45,31 +46,15 @@ def rag_tool(question: str) -> str:
     """Use this tool to query specific healthcare data from the database."""
     try:
         result = graphrag_instance.run(question)
-        logger.info("Raw GraphRAG result: %s", result)
+        logger.info("GraphRAG completed with status: %s", result.get("status"))
 
         # Lưu query nếu có
         if isinstance(result, dict) and "query" in result:
             set_last_query(result["query"])
 
-        # Xử lý response
+        # Return only controlled output; never expose raw Cypher as a fallback.
         if isinstance(result, dict) and "response" in result:
-            response = result["response"]
-
-            # Kiểm tra response có hợp lệ
-            if response and not any(msg in str(response)
-                                    for msg in ["No information found", "Error"]):
-                # Format response dựa vào kiểu dữ liệu
-                if isinstance(response, list):
-                    return "\n".join(str(item) for item in response)
-                else:
-                    return str(response)
-
-            # Fallback to query if response is invalid
-            if "query" in result and result["query"]:
-                return str(result["query"])
-
-            # Return whatever response we have
-            return str(response) if response else "No information found"
+            return format_grounded_response(result)
 
         return "No information found"
     except Exception as e:  # pylint: disable=broad-exception-caught

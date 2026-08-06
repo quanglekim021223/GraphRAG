@@ -5,11 +5,28 @@ This module handles interactions with OpenAI language models, including query ge
 validation, and response formatting. It serves as the interface between the application
 and external AI services, providing error handling and prompt templating.
 """
-from typing import Dict, Any
 import re
+from typing import Dict, Any
 from openai import OpenAI, OpenAIError
 from langchain.prompts import PromptTemplate
+from pydantic import BaseModel, Field
 from src.helpers.logging_config import logger
+
+
+class CypherGeneration(BaseModel):
+    """One-call plan containing the query and its data-free response template."""
+
+    cypher: str = Field(
+        description="A read-only Cypher query using explicit RETURN aliases."
+    )
+    response_template: str = Field(
+        description=(
+            "Natural-language per-row template. Every dynamic value must be a "
+            "Python-style {column_alias} placeholder matching an explicit "
+            "RETURN alias in cypher. It must not contain concrete names, "
+            "numbers, values, or conditional logic."
+        )
+    )
 
 
 class LLMManager:
@@ -32,7 +49,9 @@ class LLMManager:
             raise ValueError(
                 f"Failed to initialize OpenAI client: {str(e)}") from e
 
-    def generate_cypher_query(self, question: str, schema: Dict[str, Any]) -> str:
+    def generate_cypher_query(
+        self, question: str, schema: Dict[str, Any]
+    ) -> CypherGeneration:
         """
         Generate a Cypher query from a natural language question.
 
@@ -41,7 +60,7 @@ class LLMManager:
             schema: Neo4j database schema
 
         Returns:
-            Generated Cypher query string
+            Structured Cypher query and per-row response template
 
         Raises:
             ValueError: If query generation fails
@@ -52,32 +71,60 @@ class LLMManager:
             Based on the Neo4j schema:
             {schema}
 
-            Generate an accurate Cypher query to answer: "{question}".
+            Generate an accurate Cypher query and a natural response_template
+            to answer: "{question}".
             - Use labels: Patient(name, age, gender, blood_type, admission_type, date_of_admission, discharge_date),
             Disease(name), Doctor(name), Hospital(name), InsuranceProvider(name), Room(room_number),
             Medication(name), TestResults(test_outcome), Billing(amount).
             - Relationships: HAS_DISEASE, TREATED_BY, ADMITTED_TO, COVERED_BY, STAY_IN, TAKE_MEDICATION,
             UNDERGOES, HAS_BILLING, WORKS_AT, PRESCRIBES, RELATED_TO_TEST, PARTNERS_WITH.
             - For name attributes, use case-insensitive matching by applying toLower() on both the node's property and the input value, e.g., WHERE toLower(n.name) = toLower('value').
-            - Return only the Cypher query, no markdown or extra text.
+            - Return scalar properties instead of whole nodes or relationships.
+            - Give every returned property a stable semantic alias, e.g.
+              RETURN p.name AS patient_name, d.name AS disease_name.
+            - Perform counts, sums, averages and date filtering in Cypher, then
+              return the computed scalar with a semantic alias.
+            - Do not add units. Preserve a unit only when it is already part of
+              the stored property name.
+            - response_template must use Python-style placeholders such as
+              {{patient_name}} and {{patient_age}}. Every placeholder must match
+              an explicit alias in the query's RETURN clause exactly.
+            - Never put a concrete number, name or data value in the template.
+              At this stage the real database values are unknown.
+            - The template may contain only natural wording, punctuation,
+              ordering and connectors. Do not use if/else or conditional logic.
+            - For queries returning multiple rows, write one per-row template;
+              the backend will loop over the rows.
             - Ensure valid syntax with MATCH, RETURN, LIMIT 5, matching the schema.
             """
         )
         try:
-            response = self.llm.chat.completions.create(
+            response = self.llm.beta.chat.completions.parse(
                 messages=[
-                    {"role": "system", "content": "You are a helpful assistant."},
+                    {
+                        "role": "system",
+                        "content": (
+                            "You generate read-only Neo4j Cypher and a data-free "
+                            "natural-language response template."
+                        ),
+                    },
                     {"role": "user", "content": prompt.format(
                         schema=schema, question=question)},
                 ],
                 temperature=0.3,
                 max_tokens=1000,
-                model=self.config.model_name
+                model=self.config.model_name,
+                response_format=CypherGeneration,
             )
-            query = response.choices[0].message.content.strip()
-            query = re.sub(r"```cypher|```", "", query).strip()
-            logger.info("Generated Cypher query: %s", query)
-            return query
+            generation = response.choices[0].message.parsed
+            if generation is None:
+                raise ValueError("LLM returned no structured Cypher generation")
+            generation.cypher = re.sub(
+                r"```(?:cypher)?|```", "", generation.cypher,
+                flags=re.IGNORECASE,
+            ).strip()
+            logger.info("Generated Cypher query: %s", generation.cypher)
+            return generation
         except OpenAIError as e:
             logger.error("Failed to generate Cypher query: %s", str(e))
             raise ValueError(
@@ -133,49 +180,82 @@ class LLMManager:
             raise ValueError(
                 f"Cypher query validation failed: {str(e)}") from e
 
-    def generate_response(self, question: str, query_result: Any) -> str:
-        """
-        Generate a natural language response from query results.
-
-        Args:
-            question: Original user question
-            query_result: Results from Neo4j database query
-
-        Returns:
-            Natural language response
-
-        Raises:
-            ValueError: If response generation fails
-        """
+    def repair_cypher_query(
+        self,
+        question: str,
+        schema: Dict[str, Any],
+        invalid_query: str,
+        diagnostic: str,
+    ) -> CypherGeneration:
+        """Repair a failed read-only Cypher query using its diagnostic."""
         prompt = PromptTemplate(
-            input_variables=["question", "result"],
+            input_variables=["question", "schema", "query", "diagnostic"],
             template="""
-            Based on the question: "{question}"
-            Neo4j Cypher query results: {result}
+            Repair the read-only Neo4j Cypher query below.
 
-            Generate a concise, accurate response in English:
-            - Use the Cypher query results as the primary source of information.
-            - If the query results are empty, state: "No information found from the database."
-            - Avoid speculation; stick to the provided data.
-            - Format the response appropriately based on the question (e.g., list of patients, details of a disease, etc.).
-            """
+            Original question:
+            {question}
+
+            Live Neo4j schema:
+            {schema}
+
+            Invalid query:
+            {query}
+
+            Validation or database diagnostic:
+            {diagnostic}
+
+            Requirements:
+            - Preserve the original question's meaning.
+            - Use only labels, relationships and properties from the schema.
+            - Produce a read-only query using MATCH/OPTIONAL MATCH, WHERE, WITH,
+              RETURN, ORDER BY, SKIP or LIMIT only.
+            - Never use CREATE, MERGE, DELETE, DETACH, SET, REMOVE, DROP, CALL,
+              LOAD CSV or FOREACH.
+            - Include LIMIT 5 unless the query returns one aggregate value.
+            - Return scalar properties with stable semantic aliases instead of
+              whole nodes or relationships.
+            - Compute every requested count, sum, average or date filter in
+              Cypher and return the computed scalar with a semantic alias.
+            - Do not add units. Preserve a unit only when it is already part of
+              the stored property name.
+            - Also produce a response_template whose Python-style placeholders
+              exactly match explicit aliases in the repaired RETURN clause.
+            - Never put concrete numbers, names or data values in the template.
+              Do not use conditional logic. The backend applies it once per row.
+            """,
         )
         try:
-            response = self.llm.chat.completions.create(
+            response = self.llm.beta.chat.completions.parse(
                 messages=[
-                    {"role": "system", "content": "You are a helpful assistant."},
-                    {"role": "user", "content": prompt.format(
-                        question=question,
-                        result=query_result if query_result else "[]"
-                    )},
+                    {
+                        "role": "system",
+                        "content": "You repair read-only Neo4j Cypher queries.",
+                    },
+                    {
+                        "role": "user",
+                        "content": prompt.format(
+                            question=question,
+                            schema=schema,
+                            query=invalid_query,
+                            diagnostic=diagnostic,
+                        ),
+                    },
                 ],
-                temperature=0.3,
+                temperature=0,
                 max_tokens=1000,
-                model=self.config.model_name
+                model=self.config.model_name,
+                response_format=CypherGeneration,
             )
-            response_text = response.choices[0].message.content.strip()
-            logger.info("Generated response text: %s", response_text)
-            return response_text
+            generation = response.choices[0].message.parsed
+            if generation is None:
+                raise ValueError("LLM returned no structured Cypher repair")
+            generation.cypher = re.sub(
+                r"```(?:cypher)?|```", "", generation.cypher,
+                flags=re.IGNORECASE,
+            ).strip()
+            logger.info("Repaired Cypher query: %s", generation.cypher)
+            return generation
         except OpenAIError as e:
-            logger.error("Failed to generate response: %s", str(e))
-            raise ValueError(f"Response generation failed: {str(e)}") from e
+            logger.error("Failed to repair Cypher query: %s", str(e))
+            raise ValueError(f"Cypher repair failed: {str(e)}") from e

@@ -15,6 +15,7 @@ from src.helpers.agent_initializer import agent_initializer
 from src.helpers.logging_config import logger
 from src.helpers.tools import get_last_query
 from src.helpers.prompts import get_healthcare_system_prompt
+from src.handlers.grounding_verifier import select_controlled_agent_response
 
 
 def run_cli():
@@ -51,8 +52,8 @@ def run_cli():
                 config_obj
             )
 
-            # Extract the response content
-            agent_response = full_response["messages"][-1].content
+            # Bypass any ReAct paraphrase when grounded database data was used.
+            agent_response = select_controlled_agent_response(full_response)
             print(f"\n🔍 Response: {agent_response}")
 
             # Try to display query info if available

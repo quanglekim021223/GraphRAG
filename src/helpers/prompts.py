@@ -36,6 +36,14 @@ Remember:
 - General knowledge and non-database information should use the LLM tool
 - When in doubt, prefer the LLM tool to avoid database errors
 - Consider the context and scope of the information needed
+- If rag_tool asks for clarification, return that request to the user and wait;
+  do not call llm_tool to guess an answer
+- When the user provides clarification, combine it with the previous question
+  and call rag_tool again
+- When rag_tool returns evidence citations such as [E1], preserve them exactly
+  and do not add any uncited patient facts
+- If rag_tool abstains because output could not be verified, return the
+  abstention to the user instead of generating an alternative patient answer
 
 Always analyze the question's intent and required information type rather than matching specific examples.
 """

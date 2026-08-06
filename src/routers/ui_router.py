@@ -16,6 +16,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from src.helpers.agent_initializer import agent_initializer
 from src.helpers.logging_config import logger
 from src.helpers.prompts import get_healthcare_system_prompt
+from src.handlers.grounding_verifier import select_controlled_agent_response
 from src.handlers.conversation_handler import (
     store_conversation,
     get_conversation_history,
@@ -126,11 +127,12 @@ def process_user_input(agent_executor, user_input):
 
             config = {"configurable": {
                 "thread_id": st.session_state.current_thread_id}}
-            response = agent_executor.invoke(
+            full_response = agent_executor.invoke(
                 {"messages": [system_message,
                               HumanMessage(content=user_input)]},
                 config
-            )["messages"][-1].content
+            )
+            response = select_controlled_agent_response(full_response)
 
         st.session_state.messages.append(
             {"role": "assistant", "content": response})
