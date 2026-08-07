@@ -13,7 +13,7 @@ from langgraph.prebuilt import create_react_agent
 from src.config.settings import Config
 from src.handlers.memory_manager import ConversationBufferMemory
 from src.helpers.llm_initializer import get_llm
-from src.helpers.tools import rag_tool, llm_tool
+from src.helpers.tools import medical_guideline_tool, rag_tool
 
 
 class AgentInitializer:
@@ -43,7 +43,7 @@ class AgentInitializer:
             self.config = Config()
             self.memory = MemorySaver()
             self.llm = get_llm()
-            self.tools = [rag_tool, llm_tool]
+            self.tools = [rag_tool, medical_guideline_tool]
             self.agent = create_react_agent(
                 self.llm, self.tools, checkpointer=self.memory)
             self.memory_manager: Dict[str, ConversationBufferMemory] = {}

@@ -12,6 +12,11 @@ import re
 from typing import Any, Dict, List, Optional, Tuple, TypedDict
 
 
+OUT_OF_SCOPE_RESPONSE = (
+    "Hệ thống này chỉ hỗ trợ tra cứu dữ liệu bệnh án đã được phân quyền. "
+    "Với kiến thức hoặc tư vấn y khoa tổng quát, vui lòng tham khảo nguồn "
+    "chuyên môn đã được đơn vị của bạn phê duyệt."
+)
 ABSTAIN_RESPONSE = (
     "Tôi không thể biểu diễn an toàn dữ liệu truy xuất được, "
     "nên sẽ không đưa ra kết luận."
@@ -242,7 +247,7 @@ def format_grounded_response(result: Dict[str, Any]) -> str:
 
 
 def select_controlled_agent_response(full_response: Dict[str, Any]) -> str:
-    """Bypass ReAct paraphrasing when this turn used the grounded RAG tool."""
+    """Return only controlled GraphRAG or allowlisted guideline-tool output."""
     messages = full_response.get("messages", [])
     current_turn = messages
 
@@ -255,9 +260,12 @@ def select_controlled_agent_response(full_response: Dict[str, Any]) -> str:
         if _message_value(message, "name") == "rag_tool":
             return str(_message_value(message, "content") or "No information found")
 
-    if not messages:
-        return "No information found"
-    return str(_message_value(messages[-1], "content") or "No information found")
+    for message in reversed(current_turn):
+        if _message_value(message, "name") == "medical_guideline_tool":
+            return str(_message_value(message, "content") or OUT_OF_SCOPE_RESPONSE)
+
+    # Fail closed if ReAct answers directly instead of using an approved tool.
+    return OUT_OF_SCOPE_RESPONSE
 
 
 def _is_supported_scalar(value: Any) -> bool:

@@ -2,6 +2,7 @@
 import unittest
 
 from src.handlers.grounding_verifier import (
+    OUT_OF_SCOPE_RESPONSE,
     build_grounded_output,
     format_grounded_response,
     render_answer,
@@ -216,16 +217,28 @@ class GroundingVerifierTests(unittest.TestCase):
                 {"type": "human", "content": "Huyết áp là gì?"},
                 {
                     "type": "tool",
-                    "name": "llm_tool",
-                    "content": "general tool result",
+                    "name": "medical_guideline_tool",
+                    "content": "Nguồn hướng dẫn [S1]",
                 },
-                {"type": "ai", "content": "general final answer"},
+                {"type": "ai", "content": "Huyết áp là áp lực của máu."},
             ]
         }
 
         selected = select_controlled_agent_response(full_response)
 
-        self.assertEqual("general final answer", selected)
+        self.assertEqual("Nguồn hướng dẫn [S1]", selected)
+
+    def test_direct_react_medical_answer_is_blocked(self):
+        full_response = {
+            "messages": [
+                {"type": "human", "content": "Huyết áp là gì?"},
+                {"type": "ai", "content": "Huyết áp là áp lực của máu."},
+            ]
+        }
+
+        selected = select_controlled_agent_response(full_response)
+
+        self.assertEqual(OUT_OF_SCOPE_RESPONSE, selected)
 
 
 if __name__ == "__main__":

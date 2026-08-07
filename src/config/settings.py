@@ -23,6 +23,13 @@ class Config:
     neo4j_username: str = os.getenv("NEO4J_USERNAME", "neo4j")
     neo4j_password: str = os.getenv("NEO4J_PASSWORD", "12345678")
     max_result_rows: int = int(os.getenv("MAX_RESULT_ROWS", "20"))
+    tavily_api_key: str = os.getenv("TAVILY_API_KEY", "")
+    medical_search_max_results: int = int(
+        os.getenv("MEDICAL_SEARCH_MAX_RESULTS", "3")
+    )
+    medical_search_min_score: float = float(
+        os.getenv("MEDICAL_SEARCH_MIN_SCORE", "0.5")
+    )
 
     _instance = None
 
@@ -42,6 +49,13 @@ class Config:
             self.neo4j_username = os.getenv("NEO4J_USERNAME", "neo4j")
             self.neo4j_password = os.getenv("NEO4J_PASSWORD", "12345678")
             self.max_result_rows = int(os.getenv("MAX_RESULT_ROWS", "20"))
+            self.tavily_api_key = os.getenv("TAVILY_API_KEY", "")
+            self.medical_search_max_results = int(
+                os.getenv("MEDICAL_SEARCH_MAX_RESULTS", "3")
+            )
+            self.medical_search_min_score = float(
+                os.getenv("MEDICAL_SEARCH_MIN_SCORE", "0.5")
+            )
             self._initialized = True
 
     def validate(self) -> None:

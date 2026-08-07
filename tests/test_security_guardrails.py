@@ -9,6 +9,7 @@ from src.handlers.security_guardrails import (
     validate_result,
 )
 from src.helpers.security_context import (
+    claim_request_tool,
     doctor_security_context,
     get_current_doctor_id,
 )
@@ -156,6 +157,14 @@ class DoctorSecurityContextTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "identity is missing"):
             get_current_doctor_id()
+
+    def test_only_one_data_tool_can_be_claimed_per_request(self):
+        with doctor_security_context("doctor-1"):
+            self.assertTrue(claim_request_tool("medical_guideline_tool"))
+            self.assertFalse(claim_request_tool("rag_tool"))
+
+        with doctor_security_context("doctor-1"):
+            self.assertTrue(claim_request_tool("rag_tool"))
 
 
 class ResultValidationTests(unittest.TestCase):

@@ -25,7 +25,7 @@ def run_cli():
     config = Config()
     config.validate()
 
-    # Initialize ReAct agent with both tools
+    # Initialize ReAct agent with grounded lookup and deterministic refusal.
     agent_executor = agent_initializer.get_agent()
 
     print("Healthcare GraphRAG CLI")

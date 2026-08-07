@@ -22,7 +22,7 @@ Healthcare GraphRAG là một hệ thống chatbot thông minh kết hợp cơ s
 ## ✨ Tính năng nổi bật
 
 - **Truy vấn thông minh**: Tự động chuyển đổi câu hỏi ngôn ngữ tự nhiên thành truy vấn Cypher chính xác
-- **Cơ chế ReAct Agent**: Lựa chọn thông minh giữa RAG và LLM tùy theo loại câu hỏi
+- **Cơ chế ReAct Agent**: Định tuyến giữa GraphRAG bệnh án và guideline search trên nguồn được phê duyệt
 - **Đa ngữ**: Hỗ trợ tiếng Việt và tiếng Anh
 - **Lưu trữ hội thoại**: Lưu và quản lý các cuộc hội thoại trong cơ sở dữ liệu Neo4j
 - **Đa nền tảng**: Giao diện web (Streamlit), API (FastAPI) và CLI
@@ -97,7 +97,7 @@ Healthcare GraphRAG là một ứng dụng theo mô hình kiến trúc phân l�
 
 3. **Lớp công cụ**:
    - GraphRAG (Truy xuất dữ liệu từ Neo4j và tăng cường câu trả lời)
-   - LLM Tool (Xử lý truy vấn kiến thức chung)
+   - Medical Guideline Tool (Tìm kiếm retrieval-only trên nguồn y khoa allowlist, kèm citation)
 
 4. **Lớp dữ liệu**:
    - Neo4j Graph Database (dữ liệu y tế và lịch sử hội thoại)
@@ -116,6 +116,8 @@ Sao chép file `.env.example` thành `.env` và điền các giá trị:
 - `NEO4J_PASSWORD`: Đặt mật khẩu bất kỳ cho Neo4j (ví dụ: `password123`).
 - `LANGCHAIN_API_KEY`: Lấy từ [LangSmith](https://smith.langchain.com/) sau khi đăng ký.
 - `GITHUB_TOKEN`: Tạo từ [GitHub Settings](https://github.com/settings/tokens) nếu cần.
+- `TAVILY_API_KEY`: Bật tìm kiếm guideline y khoa. Nếu thiếu key, tool sẽ
+  fail-closed và không tự tạo câu trả lời không có nguồn.
 ## Setup
 
 1. Clone the repository
@@ -227,6 +229,23 @@ queries such as `UNION`, subqueries and `WITH` pipelines are rejected because th
 local scope rewriter intentionally supports only a small auditable subset.
 LangGraph checkpoint thread IDs, saved conversations and last-query metadata are
 also doctor-scoped/request-local to prevent cross-request history leakage.
+
+### Allowlisted medical guideline search
+
+General medical questions use Tavily only as a retrieval provider. Provider-side
+answer generation and raw-content retrieval are disabled. Results are accepted
+only when HTTPS URL host and path match the local allowlist in
+`src/handlers/medical_guideline_search.py`:
+
+- WHO guidelines, publications and fact sheets
+- NICE guidance
+- CDC healthcare-professional clinical guidance
+- Explicit Ministry of Health document attachment paths
+
+Every accepted snippet is returned unchanged with `[S1]`, `[S2]` citations;
+the outer ReAct model cannot paraphrase it. Patient identifiers are rejected
+before the network call, and one request may invoke only one data-bearing tool,
+preventing web content from triggering a subsequent patient-data lookup.
 
 ## Hướng dẫn chạy non-Docker
 - **Để chạy Streamlit UI**: 
