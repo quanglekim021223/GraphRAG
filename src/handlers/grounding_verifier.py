@@ -247,7 +247,7 @@ def format_grounded_response(result: Dict[str, Any]) -> str:
 
 
 def select_controlled_agent_response(full_response: Dict[str, Any]) -> str:
-    """Return only controlled GraphRAG or allowlisted guideline-tool output."""
+    """Return only controlled GraphRAG or curated guideline-tool output."""
     messages = full_response.get("messages", [])
     current_turn = messages
 

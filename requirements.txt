@@ -19,6 +19,7 @@ langsmith>=0.0.60
 # Công cụ và tiện ích
 python-dotenv>=1.0.0
 nest-asyncio>=1.5.8
+pypdf>=5.0.0
 
 # Logging và monitoring
-python-logging-loki>=0.3.1 
+python-logging-loki>=0.3.1

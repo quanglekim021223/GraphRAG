@@ -51,6 +51,21 @@ class Config:
     medical_search_circuit_cooldown_seconds: int = int(
         os.getenv("MEDICAL_SEARCH_CIRCUIT_COOLDOWN_SECONDS", "60")
     )
+    curated_guideline_db_path: str = os.getenv(
+        "CURATED_GUIDELINE_DB_PATH", "data/curated_guidelines.sqlite3"
+    )
+    curated_embedding_endpoint: str = os.getenv(
+        "CURATED_EMBEDDING_ENDPOINT", "https://models.github.ai/inference"
+    )
+    curated_embedding_model: str = os.getenv(
+        "CURATED_EMBEDDING_MODEL", "openai/text-embedding-3-small"
+    )
+    curated_retrieval_top_k: int = int(
+        os.getenv("CURATED_RETRIEVAL_TOP_K", "3")
+    )
+    curated_retrieval_min_score: float = float(
+        os.getenv("CURATED_RETRIEVAL_MIN_SCORE", "0.45")
+    )
 
     _instance = None
 
@@ -97,6 +112,22 @@ class Config:
             )
             self.medical_search_circuit_cooldown_seconds = int(
                 os.getenv("MEDICAL_SEARCH_CIRCUIT_COOLDOWN_SECONDS", "60")
+            )
+            self.curated_guideline_db_path = os.getenv(
+                "CURATED_GUIDELINE_DB_PATH", "data/curated_guidelines.sqlite3"
+            )
+            self.curated_embedding_endpoint = os.getenv(
+                "CURATED_EMBEDDING_ENDPOINT",
+                "https://models.github.ai/inference",
+            )
+            self.curated_embedding_model = os.getenv(
+                "CURATED_EMBEDDING_MODEL", "openai/text-embedding-3-small"
+            )
+            self.curated_retrieval_top_k = int(
+                os.getenv("CURATED_RETRIEVAL_TOP_K", "3")
+            )
+            self.curated_retrieval_min_score = float(
+                os.getenv("CURATED_RETRIEVAL_MIN_SCORE", "0.45")
             )
             self._initialized = True
 

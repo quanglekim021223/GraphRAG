@@ -47,7 +47,7 @@ Remember:
   to medical_guideline_tool. It is only for de-identified general questions.
 - Pass only the current de-identified question verbatim to medical_guideline_tool;
   never append previous conversation context.
-- Preserve medical guideline citations such as [S1] exactly and do not add any
+- Preserve curated guideline citations such as [G1] exactly and do not add any
   uncited medical claims.
 - Never provide a direct answer without a tool call. The application will reject
   direct model answers.

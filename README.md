@@ -22,7 +22,7 @@ Healthcare GraphRAG là một hệ thống chatbot thông minh kết hợp cơ s
 ## ✨ Tính năng nổi bật
 
 - **Truy vấn thông minh**: Tự động chuyển đổi câu hỏi ngôn ngữ tự nhiên thành truy vấn Cypher chính xác
-- **Cơ chế ReAct Agent**: Định tuyến giữa GraphRAG bệnh án và guideline search trên nguồn được phê duyệt
+- **Cơ chế ReAct Agent**: Định tuyến giữa GraphRAG bệnh án và curated guideline corpus đã duyệt
 - **Đa ngữ**: Hỗ trợ tiếng Việt và tiếng Anh
 - **Lưu trữ hội thoại**: Lưu và quản lý các cuộc hội thoại trong cơ sở dữ liệu Neo4j
 - **Đa nền tảng**: Giao diện web (Streamlit), API (FastAPI) và CLI
@@ -230,11 +230,23 @@ local scope rewriter intentionally supports only a small auditable subset.
 LangGraph checkpoint thread IDs, saved conversations and last-query metadata are
 also doctor-scoped/request-local to prevent cross-request history leakage.
 
-### Allowlisted medical guideline search
+### Curated medical guideline corpus
 
-General medical questions use Tavily only as a retrieval provider. Provider-side
-answer generation and raw-content retrieval are disabled. Results are accepted
-only when HTTPS URL host and path match the local allowlist in
+General medical questions are answered only from a local corpus of explicitly
+reviewed, currently effective documents. The runtime path is:
+
+```text
+medical_guideline_tool
+→ reject patient-identifying input
+→ embed the current de-identified question
+→ search approved + active document sections
+→ return extractive section text with [G1], [G2] citations
+```
+
+Tavily is no longer part of this answer path. It is available only to the admin
+`discover` command for finding candidate documents. Provider-side answer
+generation and raw-content retrieval remain disabled during discovery. Candidate
+URLs are accepted only when HTTPS host and path match the local allowlist in
 `src/handlers/medical_guideline_search.py`:
 
 - WHO guidelines, publications and fact sheets
@@ -242,10 +254,9 @@ only when HTTPS URL host and path match the local allowlist in
 - CDC healthcare-professional clinical guidance
 - Explicit Ministry of Health document attachment paths
 
-Every accepted snippet is returned unchanged with `[S1]`, `[S2]` citations;
-the outer ReAct model cannot paraphrase it. Patient identifiers are rejected
-before the network call, and one request may invoke only one data-bearing tool,
-preventing web content from triggering a subsequent patient-data lookup.
+Discovery snippets are never inserted or approved automatically. Patient
+identifiers are rejected before any external call, and one chat request may
+invoke only one data-bearing tool.
 
 Before a citation is accepted, the backend performs a bounded `HEAD` check with
 automatic redirects disabled. Every redirect hop and the final URL must remain
@@ -254,7 +265,7 @@ link-local or reserved addresses are rejected. An infrastructure egress proxy
 is still recommended in production to close DNS-rebinding and network-policy
 gaps that application code alone cannot fully eliminate.
 
-The live-search runtime also provides process-local controls:
+The discovery runtime also provides process-local controls:
 
 - normalized-question TTL cache;
 - per-doctor sliding one-minute rate limit;
@@ -263,14 +274,57 @@ The live-search runtime also provides process-local controls:
   below the configured blocking-delay cap;
 - circuit breaker after repeated provider failures.
 
-Evidence records include provider URL, validated final URL, retrieval time,
-content hash, score and deterministic source priority. Current priority is
-Ministry of Health documents, WHO, NICE, then CDC. Multiple sources remain
-separate and the system explicitly does not resolve clinical disagreement.
-These controls are in-memory per process; multi-worker production deployments
-must move shared cache/rate/budget/circuit state to Redis or an equivalent
-central store. Live search still lacks authoritative publication-version and
-effective-status tracking; that requires the separate curated-ingestion phase.
+Discovery evidence includes provider URL, validated final URL, retrieval time,
+content hash, score and deterministic source priority. These controls are
+in-memory per process; multi-worker production deployments must move shared
+cache/rate/budget/circuit state to Redis or an equivalent central store.
+
+Curated ingestion is managed with:
+
+```bash
+# 1. Find candidates only; nothing is approved automatically.
+python3 -m scripts.curated_guidelines discover "WHO hypertension guideline"
+
+# 2. Controlled download and immutable hash; status remains pending_review.
+python3 -m scripts.curated_guidelines ingest \
+  --url "https://www.who.int/news-room/fact-sheets/detail/hypertension" \
+  --title "Hypertension" --publisher "WHO" \
+  --publication-date 2025-09-25 --version 2025.1 \
+  --effective-from 2025-09-25
+
+# 3. Inspect immutable metadata, document hash and extracted preview sections.
+python3 -m scripts.curated_guidelines show DOCUMENT_ID
+
+# 4. Extract, chunk, embed and activate only the exact inspected hash.
+python3 -m scripts.curated_guidelines approve DOCUMENT_ID \
+  --reviewer REVIEWER_ID --expected-hash SHA256_FROM_SHOW
+```
+
+`ingest` downloads at most 10 MB, checks the allowlisted redirect/final URL and
+public DNS resolution, accepts only PDF/HTML/plain text, then stores the original
+bytes and SHA-256 as `pending_review`. It does not create any vector yet. `show`
+extracts preview sections so the reviewer can inspect the frozen content.
+`approve` rechecks the exact hash, performs full-text extraction, chunks only
+inside section boundaries, creates embeddings, and commits the index plus active
+state in one transaction. It records reviewer/time/hash and automatically marks
+an older active version of the same source URL as `superseded`. Admins can also
+`reject` pending candidates or `withdraw` approved documents.
+
+At query time only documents with `review_status=approved`,
+`effective_status=active`, a matching embedding model and a valid effective date
+are eligible. Responses contain verbatim section text, title, heading, source
+URL, publication date and version; the outer ReAct model cannot rewrite them.
+Different sources remain separate and the system does not resolve clinical
+disagreement automatically.
+
+The SQLite cosine scan is intentionally sized for a small curated corpus. A
+large corpus should move the same metadata contract to a real vector index.
+PDFs use outline headings when available and otherwise fall back to page-level
+boundaries; scanned PDFs still require a separately reviewed OCR pipeline. An
+egress proxy remains necessary to close DNS-rebinding risk completely. Embedding uses
+the separately configured GitHub Models endpoint/model; the token needs Models
+read permission. Changing the embedding model intentionally makes old vectors
+ineligible until the documents are re-ingested with that model.
 
 ## Hướng dẫn chạy non-Docker
 - **Để chạy Streamlit UI**: 
