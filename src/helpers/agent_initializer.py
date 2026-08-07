@@ -58,7 +58,9 @@ class AgentInitializer:
         """
         return self.agent
 
-    def get_memory(self, thread_id: str) -> ConversationBufferMemory:
+    def get_memory(
+        self, thread_id: str, doctor_id: str
+    ) -> ConversationBufferMemory:
         """
         Get or create memory for thread.
 
@@ -68,12 +70,14 @@ class AgentInitializer:
         Returns:
             ConversationBufferMemory: Memory instance for the specified thread
         """
-        if thread_id not in self.memory_manager:
-            self.memory_manager[thread_id] = ConversationBufferMemory(
-                thread_id)
-        return self.memory_manager[thread_id]
+        memory_key = f"{doctor_id}:{thread_id}"
+        if memory_key not in self.memory_manager:
+            self.memory_manager[memory_key] = ConversationBufferMemory(
+                thread_id, doctor_id
+            )
+        return self.memory_manager[memory_key]
 
-    def get_conversation_context(self, thread_id: str) -> str:
+    def get_conversation_context(self, thread_id: str, doctor_id: str) -> str:
         """
         Get full conversation context for the given thread.
 
@@ -86,7 +90,7 @@ class AgentInitializer:
         if not thread_id:
             return ""
 
-        memory = self.get_memory(thread_id)
+        memory = self.get_memory(thread_id, doctor_id)
         context = memory.get_conversation_context()
 
         context_parts = []

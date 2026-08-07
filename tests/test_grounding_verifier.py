@@ -94,6 +94,28 @@ class GroundingVerifierTests(unittest.TestCase):
             source["field"] for source in evidence[1]["sources"]
         ])
 
+    def test_null_template_field_uses_fallback_without_evidence(self):
+        answer, evidence = render_answer(
+            [{"patient_name": "Alice", "patient_age": None}],
+            "Bệnh nhân {patient_name} năm nay {patient_age}.",
+        )
+
+        self.assertIn("(không có dữ liệu patient age)", answer)
+        self.assertEqual(
+            ["patient_name"],
+            [source["field"] for source in evidence[0]["sources"]],
+        )
+
+    def test_outlier_warning_keeps_raw_value_in_evidence(self):
+        answer, evidence = render_answer(
+            [{"patient_age": 150}],
+            "Tuổi được ghi nhận là {patient_age}.",
+            {(0, "patient_age"): "giá trị bất thường, vui lòng xác minh lại"},
+        )
+
+        self.assertIn("giá trị bất thường", answer)
+        self.assertEqual(150, evidence[0]["sources"][0]["value"])
+
     def test_cypher_literal_cannot_be_copied_into_template(self):
         cypher = (
             "MATCH (p:Patient) WHERE p.name = 'Alice' "

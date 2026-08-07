@@ -14,9 +14,10 @@ from src.handlers.conversation_handler import get_conversation_history
 class Neo4jChatMessageHistory(BaseChatMessageHistory):
     """Chat message history stored in Neo4j database."""
 
-    def __init__(self, thread_id: str):
+    def __init__(self, thread_id: str, doctor_id: str):
         """Initialize with thread ID."""
         self.thread_id = thread_id
+        self.doctor_id = doctor_id
         self.messages = []
         self._load_from_neo4j()
 
@@ -25,7 +26,7 @@ class Neo4jChatMessageHistory(BaseChatMessageHistory):
         if not self.thread_id:
             return
 
-        history = get_conversation_history(self.thread_id)
+        history = get_conversation_history(self.thread_id, self.doctor_id)
         messages = []
         for msg in history:
             if msg["role"] == "user":
@@ -51,15 +52,20 @@ class Neo4jChatMessageHistory(BaseChatMessageHistory):
 class ConversationBufferMemory:
     """Memory manager that uses Neo4j for persistent storage."""
 
-    def __init__(self, thread_id: Optional[str] = None):
+    def __init__(
+        self, thread_id: Optional[str] = None, doctor_id: Optional[str] = None
+    ):
         self.thread_id = thread_id
+        self.doctor_id = doctor_id
         self.chat_memory = Neo4jChatMessageHistory(
-            thread_id) if thread_id else None
+            thread_id, doctor_id
+        ) if thread_id and doctor_id else None
 
-    def set_thread_id(self, thread_id: str):
+    def set_thread_id(self, thread_id: str, doctor_id: str):
         """Update thread ID and reload memory."""
         self.thread_id = thread_id
-        self.chat_memory = Neo4jChatMessageHistory(thread_id)
+        self.doctor_id = doctor_id
+        self.chat_memory = Neo4jChatMessageHistory(thread_id, doctor_id)
 
     def get_chat_history(self) -> str:
         """Format chat history as a string for context."""

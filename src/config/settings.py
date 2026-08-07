@@ -22,6 +22,7 @@ class Config:
     neo4j_uri: str = os.getenv("NEO4J_URI", "bolt://localhost:7689")
     neo4j_username: str = os.getenv("NEO4J_USERNAME", "neo4j")
     neo4j_password: str = os.getenv("NEO4J_PASSWORD", "12345678")
+    max_result_rows: int = int(os.getenv("MAX_RESULT_ROWS", "20"))
 
     _instance = None
 
@@ -40,6 +41,7 @@ class Config:
             self.neo4j_uri = os.getenv("NEO4J_URI", "bolt://localhost:7689")
             self.neo4j_username = os.getenv("NEO4J_USERNAME", "neo4j")
             self.neo4j_password = os.getenv("NEO4J_PASSWORD", "12345678")
+            self.max_result_rows = int(os.getenv("MAX_RESULT_ROWS", "20"))
             self._initialized = True
 
     def validate(self) -> None:

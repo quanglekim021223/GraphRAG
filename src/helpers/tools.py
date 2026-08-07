@@ -5,19 +5,23 @@ This module provides specialized tools used by the agent system, including RAG l
 with Neo4j database and general LLM response generation. It handles routing between
 knowledge database lookups and general medical knowledge responses.
 """
+from contextvars import ContextVar
+from typing import Optional
+
 from langchain_core.tools import tool
 from langchain_core.messages import SystemMessage, HumanMessage
 from src.helpers.logging_config import logger
 from src.handlers.grounding_verifier import format_grounded_response
 from src.handlers.graphrag_handler import HealthcareGraphRAG
 from src.helpers.llm_initializer import get_llm
+from src.helpers.security_context import get_current_doctor_id
 
 # Initialize singleton instances
 graphrag_instance = HealthcareGraphRAG()
 llm = get_llm()
 
-# Last executed Cypher query for debugging/display
-LAST_QUERY = None
+# Request-local Cypher metadata; a process global can leak across doctors.
+_LAST_QUERY: ContextVar[Optional[str]] = ContextVar("last_query", default=None)
 
 
 def get_last_query():
@@ -27,7 +31,7 @@ def get_last_query():
     Returns:
         str: The most recent Cypher query or None if no query has been executed
     """
-    return LAST_QUERY
+    return _LAST_QUERY.get()
 
 
 def set_last_query(query):
@@ -37,15 +41,14 @@ def set_last_query(query):
     Args:
         query: The Cypher query string to store
     """
-    global LAST_QUERY
-    LAST_QUERY = query
+    _LAST_QUERY.set(query)
 
 
 @tool
 def rag_tool(question: str) -> str:
     """Use this tool to query specific healthcare data from the database."""
     try:
-        result = graphrag_instance.run(question)
+        result = graphrag_instance.run(question, get_current_doctor_id())
         logger.info("GraphRAG completed with status: %s", result.get("status"))
 
         # Lưu query nếu có
@@ -60,7 +63,7 @@ def rag_tool(question: str) -> str:
     except Exception as e:  # pylint: disable=broad-exception-caught
         # Broad exception is necessary here as this is a fallback tool
         logger.error("GraphRAG error: %s", str(e))
-        return f"Error: {str(e)}"
+        return "Không thể truy cập dữ liệu khi chưa xác định danh tính bác sĩ."
 
 
 @tool

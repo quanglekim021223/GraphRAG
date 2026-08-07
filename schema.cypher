@@ -11,6 +11,9 @@
 CREATE CONSTRAINT patient_name_constraint IF NOT EXISTS 
 FOR (p:Patient) REQUIRE p.name IS UNIQUE;
 
+CREATE CONSTRAINT patient_id_constraint IF NOT EXISTS
+FOR (p:Patient) REQUIRE p.patient_id IS UNIQUE;
+
 // Disease constraints
 CREATE CONSTRAINT disease_name_constraint IF NOT EXISTS 
 FOR (d:Disease) REQUIRE d.name IS UNIQUE;
@@ -47,6 +50,7 @@ CREATE INDEX patient_blood_type_idx IF NOT EXISTS FOR (p:Patient) ON (p.blood_ty
 CREATE INDEX patient_admission_type_idx IF NOT EXISTS FOR (p:Patient) ON (p.admission_type);
 CREATE INDEX patient_date_of_admission_idx IF NOT EXISTS FOR (p:Patient) ON (p.date_of_admission);
 CREATE INDEX patient_discharge_date_idx IF NOT EXISTS FOR (p:Patient) ON (p.discharge_date);
+CREATE INDEX patient_attending_doctor_idx IF NOT EXISTS FOR (p:Patient) ON (p.attending_doctor_id);
 
 // Indexes for TestResults
 CREATE INDEX test_outcome_idx IF NOT EXISTS FOR (t:TestResults) ON (t.test_outcome);
@@ -61,7 +65,7 @@ CALL apoc.meta.schema();
 
 // Node Types và Properties
 //
-// Patient: {name, age, gender, blood_type, admission_type, date_of_admission, discharge_date}
+// Patient: {patient_id, attending_doctor_id, name, age, gender, blood_type, admission_type, date_of_admission, discharge_date}
 // Disease: {name}
 // Doctor: {name}
 // Hospital: {name}
@@ -70,6 +74,14 @@ CALL apoc.meta.schema();
 // Medication: {name}
 // TestResults: {test_outcome}
 // Billing: {amount}
+//
+// SECURITY DATA CONTRACT (must pass before the application starts):
+// MATCH (p:Patient)
+// WHERE p.patient_id IS NULL OR trim(toString(p.patient_id)) = ''
+//    OR p.attending_doctor_id IS NULL OR trim(toString(p.attending_doctor_id)) = ''
+// RETURN count(p) AS invalid_patient_count;
+// invalid_patient_count MUST be 0. Backfill from an authoritative identity/assignment
+// source; never derive ownership heuristically from patient names or LLM output.
 
 // Relationship Types
 //

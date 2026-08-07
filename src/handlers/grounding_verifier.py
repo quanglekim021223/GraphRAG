@@ -80,13 +80,14 @@ def validate_template(template: str, cypher: str) -> bool:
 def build_grounded_output(
     query_result: List[Dict[str, Any]],
     response_template: Optional[str] = None,
+    field_warnings: Optional[Dict[Tuple[int, str], str]] = None,
 ) -> Dict[str, Any]:
     """Build the existing response contract with optional safe natural wording."""
     answer, evidence, omitted_fields = _render_answer_details(
-        query_result, response_template
+        query_result, response_template, field_warnings
     )
 
-    if not evidence:
+    if not answer:
         return _abstain("unsupported_result_shape", omitted_fields)
 
     if omitted_fields:
@@ -106,15 +107,21 @@ def build_grounded_output(
 
 
 def render_answer(
-    rows: List[Dict[str, Any]], template: str
+    rows: List[Dict[str, Any]],
+    template: str,
+    field_warnings: Optional[Dict[Tuple[int, str], str]] = None,
 ) -> Tuple[str, List[Evidence]]:
     """Render each row; formatting failures fall back for that row only."""
-    answer, evidence, _ = _render_answer_details(rows, template)
+    answer, evidence, _ = _render_answer_details(
+        rows, template, field_warnings
+    )
     return (answer or ABSTAIN_RESPONSE, evidence)
 
 
 def _render_answer_details(
-    rows: List[Dict[str, Any]], template: Optional[str]
+    rows: List[Dict[str, Any]],
+    template: Optional[str],
+    field_warnings: Optional[Dict[Tuple[int, str], str]] = None,
 ) -> Tuple[str, List[Evidence], int]:
     evidence: List[Evidence] = []
     answer_lines = []
@@ -122,6 +129,7 @@ def _render_answer_details(
     template_fields = list(dict.fromkeys(
         PLACEHOLDER_PATTERN.findall(template or "")
     ))
+    warnings = field_warnings or {}
 
     for row_index, row in enumerate(rows):
         if not isinstance(row, dict):
@@ -142,46 +150,76 @@ def _render_answer_details(
                     for field in template_fields
                 ):
                     raise KeyError("Template field is missing or non-scalar")
-                sentence = template.format(**row).strip()  # type: ignore[union-attr]
+                format_row = dict(row)
+                for field in template_fields:
+                    value = row[field]
+                    if value is None:
+                        format_row[field] = _missing_value_text(field)
+                    elif (row_index, field) in warnings:
+                        format_row[field] = (
+                            f"{value} ({warnings[(row_index, field)]})"
+                        )
+                sentence = template.format(**format_row).strip()  # type: ignore[union-attr]
                 if not sentence:
                     raise ValueError("Rendered template is empty")
                 sources = [
                     {"row": row_index, "field": field, "value": row[field]}
                     for field in template_fields
+                    if row[field] is not None
                 ]
             except Exception:  # Fail closed for every formatting failure.
-                sentence, sources = _render_deterministic_row(row, row_index)
+                sentence, sources = _render_deterministic_row(
+                    row, row_index, warnings
+                )
         else:
-            sentence, sources = _render_deterministic_row(row, row_index)
+            sentence, sources = _render_deterministic_row(
+                row, row_index, warnings
+            )
 
-        if not sources:
+        if not sentence:
             continue
 
-        evidence_id = f"E{len(evidence) + 1}"
-        evidence.append(
-            {
-                "id": evidence_id,
-                "claim": sentence,
-                "sources": sources,
-            }
-        )
         punctuation = "" if sentence.endswith((".", "!", "?")) else "."
-        answer_lines.append(f"- {sentence}{punctuation} [{evidence_id}]")
+        if sources:
+            evidence_id = f"E{len(evidence) + 1}"
+            evidence.append(
+                {
+                    "id": evidence_id,
+                    "claim": sentence,
+                    "sources": sources,
+                }
+            )
+            answer_lines.append(f"- {sentence}{punctuation} [{evidence_id}]")
+        else:
+            answer_lines.append(f"- {sentence}{punctuation}")
 
     return "\n".join(answer_lines), evidence, omitted_fields
 
 
 def _render_deterministic_row(
-    row: Dict[str, Any], row_index: int
+    row: Dict[str, Any],
+    row_index: int,
+    field_warnings: Optional[Dict[Tuple[int, str], str]] = None,
 ) -> Tuple[str, List[EvidenceSource]]:
     sources = []
     facts = []
+    warnings = field_warnings or {}
     for field, value in row.items():
         if not isinstance(field, str) or not _is_supported_scalar(value):
             continue
+        if value is None:
+            facts.append(_missing_value_text(field))
+            continue
         sources.append({"row": row_index, "field": field, "value": value})
-        facts.append(f"{_humanize_field(field)}: {_display_value(value)}")
+        displayed_value = _display_value(value)
+        if (row_index, field) in warnings:
+            displayed_value += f" ({warnings[(row_index, field)]})"
+        facts.append(f"{_humanize_field(field)}: {displayed_value}")
     return "; ".join(facts), sources
+
+
+def _missing_value_text(field: str) -> str:
+    return f"(không có dữ liệu {_humanize_field(field).lower()})"
 
 
 def format_grounded_response(result: Dict[str, Any]) -> str:

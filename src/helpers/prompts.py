@@ -44,6 +44,8 @@ Remember:
   and do not add any uncited patient facts
 - If rag_tool abstains because output could not be verified, return the
   abstention to the user instead of generating an alternative patient answer
+- If rag_tool returns authorization_denied, manual_review or validation_failed,
+  return that controlled message exactly and never call llm_tool as a fallback
 
 Always analyze the question's intent and required information type rather than matching specific examples.
 """

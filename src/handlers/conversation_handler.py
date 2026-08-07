@@ -15,18 +15,21 @@ config = Config()
 graphrag = HealthcareGraphRAG()
 
 
-def store_conversation(thread_id: str, user_input: str, response: str):
+def store_conversation(
+    thread_id: str, doctor_id: str, user_input: str, response: str
+):
     """Store conversation history in Neo4j."""
     try:
         # pylint: disable=protected-access
         with graphrag.graph_manager.graph._driver.session() as session:
             session.run(
                 """
-                MERGE (c:Conversation {thread_id: $thread_id})
+                MERGE (c:Conversation {thread_id: $thread_id, doctor_id: $doctor_id})
                 CREATE (m:Message {user_input: $user_input, response: $response, timestamp: $timestamp})
                 CREATE (c)-[:HAS_MESSAGE]->(m)
                 """,
                 {"thread_id": thread_id,
+                 "doctor_id": doctor_id,
                  "user_input": user_input,
                  "response": response,
                  "timestamp": str(datetime.now())}
@@ -37,18 +40,20 @@ def store_conversation(thread_id: str, user_input: str, response: str):
         logger.error("Error storing conversation: %s", str(e))
 
 
-def get_conversation_history(thread_id: str) -> List[Dict[str, str]]:
+def get_conversation_history(
+    thread_id: str, doctor_id: str
+) -> List[Dict[str, str]]:
     """Retrieve conversation history from Neo4j."""
     try:
         # pylint: disable=protected-access
         with graphrag.graph_manager.graph._driver.session() as session:
             result = session.run(
                 """
-                MATCH (c:Conversation {thread_id: $thread_id})-[:HAS_MESSAGE]->(m:Message)
+                MATCH (c:Conversation {thread_id: $thread_id, doctor_id: $doctor_id})-[:HAS_MESSAGE]->(m:Message)
                 RETURN m.user_input AS user_input, m.response AS response, m.timestamp AS timestamp
                 ORDER BY m.timestamp
                 """,
-                {"thread_id": thread_id}
+                {"thread_id": thread_id, "doctor_id": doctor_id}
             )
             history = []
             for record in result:
@@ -62,16 +67,17 @@ def get_conversation_history(thread_id: str) -> List[Dict[str, str]]:
         return []
 
 
-def get_all_conversations() -> List[str]:
-    """Retrieve all conversation thread_ids from Neo4j."""
+def get_all_conversations(doctor_id: str) -> List[str]:
+    """Retrieve only the authenticated doctor's conversation thread IDs."""
     try:
         # pylint: disable=protected-access
         with graphrag.graph_manager.graph._driver.session() as session:
             result = session.run(
                 """
-                MATCH (c:Conversation)
+                MATCH (c:Conversation {doctor_id: $doctor_id})
                 RETURN c.thread_id AS thread_id
-                """
+                """,
+                {"doctor_id": doctor_id},
             )
             return [record["thread_id"] for record in result]
     except Exception as e:  # pylint: disable=broad-exception-caught
@@ -79,17 +85,17 @@ def get_all_conversations() -> List[str]:
         return []
 
 
-def delete_conversation(thread_id: str) -> bool:
+def delete_conversation(thread_id: str, doctor_id: str) -> bool:
     """Delete a conversation and its messages from Neo4j."""
     try:
         # pylint: disable=protected-access
         with graphrag.graph_manager.graph._driver.session() as session:
             session.run(
                 """
-                MATCH (c:Conversation {thread_id: $thread_id})-[:HAS_MESSAGE]->(m:Message)
+                MATCH (c:Conversation {thread_id: $thread_id, doctor_id: $doctor_id})-[:HAS_MESSAGE]->(m:Message)
                 DETACH DELETE c, m
                 """,
-                {"thread_id": thread_id}
+                {"thread_id": thread_id, "doctor_id": doctor_id}
             )
         logger.info("Deleted conversation for thread_id: %s", thread_id)
         return True

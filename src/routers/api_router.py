@@ -8,15 +8,17 @@ import uuid
 from typing import Optional
 
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
 from langchain_core.messages import SystemMessage, HumanMessage
 from src.helpers.agent_initializer import agent_initializer
 from src.config.settings import Config
 from src.helpers.logging_config import logger
-from src.helpers.tools import get_last_query
+from src.helpers.tools import get_last_query, set_last_query
 from src.helpers.prompts import get_healthcare_system_prompt
 from src.handlers.grounding_verifier import select_controlled_agent_response
+from src.helpers.security_context import doctor_security_context
+from src.handlers.security_guardrails import check_prompt_injection
 
 
 class ChatRequest(BaseModel):
@@ -46,12 +48,25 @@ def create_app():
         return {"message": "Welcome to the Healthcare GraphRAG chatbot (FastAPI)!"}
 
     @app.post("/chat")
-    async def chat(request_body: ChatRequest):
+    async def chat(
+        request_body: ChatRequest,
+        doctor_id: str = Header(..., alias="X-Doctor-ID"),
+    ):
         question = request_body.question
         thread_id = request_body.thread_id or str(uuid.uuid4())
 
         if not question:
             raise HTTPException(status_code=400, detail="Question is required")
+        if check_prompt_injection(question):
+            return {
+                "question": question,
+                "response": (
+                    "Yêu cầu này cần được kiểm tra thủ công trước khi truy cập dữ liệu."
+                ),
+                "query": None,
+                "thread_id": thread_id,
+                "status": "manual_review",
+            }
 
         try:
             # Sử dụng prompt chung từ helpers/prompts.py
@@ -59,13 +74,18 @@ def create_app():
             system_message = SystemMessage(content=system_content)
 
             # Truyền thread_id vào config
-            config_obj = {"configurable": {"thread_id": thread_id}}
+            config_obj = {"configurable": {
+                "thread_id": f"{doctor_id}:{thread_id}"
+            }}
 
             # Gọi agent
-            full_response = await agent_executor.ainvoke(
-                {"messages": [system_message, HumanMessage(content=question)]},
-                config_obj
-            )
+            # X-Doctor-ID must be injected from verified auth claims/gateway in production.
+            with doctor_security_context(doctor_id):
+                set_last_query(None)
+                full_response = await agent_executor.ainvoke(
+                    {"messages": [system_message, HumanMessage(content=question)]},
+                    config_obj
+                )
 
             # Bypass any ReAct paraphrase when grounded database data was used.
             agent_response = select_controlled_agent_response(full_response)

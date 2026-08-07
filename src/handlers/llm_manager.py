@@ -73,13 +73,16 @@ class LLMManager:
 
             Generate an accurate Cypher query and a natural response_template
             to answer: "{question}".
-            - Use labels: Patient(name, age, gender, blood_type, admission_type, date_of_admission, discharge_date),
+            - Use labels: Patient(patient_id, attending_doctor_id, name, age, gender, blood_type, admission_type, date_of_admission, discharge_date),
             Disease(name), Doctor(name), Hospital(name), InsuranceProvider(name), Room(room_number),
             Medication(name), TestResults(test_outcome), Billing(amount).
             - Relationships: HAS_DISEASE, TREATED_BY, ADMITTED_TO, COVERED_BY, STAY_IN, TAKE_MEDICATION,
             UNDERGOES, HAS_BILLING, WORKS_AT, PRESCRIBES, RELATED_TO_TEST, PARTNERS_WITH.
             - For name attributes, use case-insensitive matching by applying toLower() on both the node's property and the input value, e.g., WHERE toLower(n.name) = toLower('value').
             - Return scalar properties instead of whole nodes or relationships.
+            - Every database query must include one explicit named Patient node.
+              Do not use UNION, CALL subqueries, WITH pipelines or anonymous
+              Patient nodes; unsupported complex queries are rejected securely.
             - Give every returned property a stable semantic alias, e.g.
               RETURN p.name AS patient_name, d.name AS disease_name.
             - Perform counts, sums, averages and date filtering in Cypher, then
@@ -208,10 +211,12 @@ class LLMManager:
             Requirements:
             - Preserve the original question's meaning.
             - Use only labels, relationships and properties from the schema.
-            - Produce a read-only query using MATCH/OPTIONAL MATCH, WHERE, WITH,
+            - Produce a read-only query using MATCH/OPTIONAL MATCH, WHERE,
               RETURN, ORDER BY, SKIP or LIMIT only.
             - Never use CREATE, MERGE, DELETE, DETACH, SET, REMOVE, DROP, CALL,
-              LOAD CSV or FOREACH.
+              LOAD CSV, FOREACH, UNION, WITH, UNWIND or subqueries.
+            - Include one explicit named Patient node; anonymous Patient nodes
+              and complex query pipelines are not supported securely.
             - Include LIMIT 5 unless the query returns one aggregate value.
             - Return scalar properties with stable semantic aliases instead of
               whole nodes or relationships.

@@ -209,6 +209,25 @@ docker-compose exec neo4j cypher-shell -u $NEO4J_USERNAME -p $NEO4J_PASSWORD "MA
 - **FastAPI**: API RESTful để tích hợp chatbot vào ứng dụng khác.
 - **CLI**: Giao diện dòng lệnh để sử dụng nhanh qua terminal.
 
+### Doctor scope authorization
+
+Patient-data queries are fail-closed and require both `patient_id` and
+`attending_doctor_id` on every `:Patient` node. The application refuses to start
+while any patient is missing either property. Backfill these values from an
+authoritative identity/assignment system; never infer ownership with an LLM or
+from patient names.
+
+The FastAPI `/chat` endpoint requires an `X-Doctor-ID` header. In production this
+header must be overwritten by a trusted authentication gateway or replaced with
+the doctor ID extracted from verified JWT/session claims. A client-supplied,
+unsigned header is not authentication.
+
+Every generated patient Cypher query is parameterized with `$doctor_id`. Complex
+queries such as `UNION`, subqueries and `WITH` pipelines are rejected because the
+local scope rewriter intentionally supports only a small auditable subset.
+LangGraph checkpoint thread IDs, saved conversations and last-query metadata are
+also doctor-scoped/request-local to prevent cross-request history leakage.
+
 ## Hướng dẫn chạy non-Docker
 - **Để chạy Streamlit UI**: 
 ```bash

@@ -6,10 +6,11 @@ and provides schema information for the GraphRAG system. It includes error handl
 and data formatting for database operations.
 """
 import re
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from neo4j.time import Date
 from langchain_neo4j import Neo4jGraph
 from src.helpers.logging_config import logger
+from src.handlers.security_guardrails import audit_event
 
 
 class GraphManager:
@@ -51,6 +52,7 @@ class GraphManager:
             )
             self.graph.run("RETURN 1")  # Test connection
             self.schema = self.graph.get_structured_schema
+            self.validate_scope_data_contract()
             logger.info("Neo4j schema loaded successfully.")
         except Exception as e:
             logger.error("Neo4j connection failed: %s", str(e), exc_info=True)
@@ -58,7 +60,11 @@ class GraphManager:
                 f"Neo4j connection failed: {str(e)}. Please ensure that the URL, username, and password are correct."
             ) from e
 
-    def execute_query(self, query: str) -> List[Dict[str, Any]]:
+    def execute_query(
+        self,
+        query: str,
+        parameters: Optional[Dict[str, Any]] = None,
+    ) -> List[Dict[str, Any]]:
         """
         Execute a Cypher query and format the results.
 
@@ -74,13 +80,13 @@ class GraphManager:
         try:
             self.validate_read_only(query)
             logger.info("Executing Cypher query: %s", query)
-            result = self.graph.query(query)
+            result = self.graph.query(query, params=parameters or {})
             records = [
                 {k: v.iso_format() if isinstance(v, Date)
                  else v for k, v in record.items()}
                 for record in result
             ]
-            logger.info("Raw query result: %s", records)
+            logger.info("Cypher query returned %s record(s)", len(records))
             return records
         except Exception as e:
             logger.error(
@@ -159,9 +165,10 @@ class GraphManager:
             return False
         variable, prop, alias = match.groups()
         label = variable_labels.get(variable)
+        if not label:
+            return False
         allowed_aliases = {prop}
-        if label:
-            allowed_aliases.add(f"{label}_{prop}")
+        allowed_aliases.add(f"{label}_{prop}")
         return alias.lower() in {item.lower() for item in allowed_aliases}
 
     @classmethod
@@ -201,14 +208,20 @@ class GraphManager:
         """Convert Neo4j labels such as TestResults to test_results."""
         return re.sub(r"(?<!^)(?=[A-Z])", "_", value).lower()
 
-    def explain_query(self, query: str) -> None:
+    def explain_query(
+        self,
+        query: str,
+        parameters: Optional[Dict[str, Any]] = None,
+    ) -> None:
         """Plan a read-only query and reject unknown schema notifications."""
         self.validate_read_only(query)
 
         try:
             # pylint: disable=protected-access
             with self.graph._driver.session() as session:
-                summary = session.run(f"EXPLAIN {query}").consume()
+                summary = session.run(
+                    f"EXPLAIN {query}", parameters or {}
+                ).consume()
 
             diagnostics = []
             for notification in summary.notifications or []:
@@ -229,6 +242,61 @@ class GraphManager:
         except Exception as e:
             logger.warning("Cypher EXPLAIN validation failed: %s", str(e))
             raise ValueError(f"Cypher EXPLAIN failed: {str(e)}") from e
+
+    def patient_reference_in_scope(
+        self, field_name: str, value: str, doctor_id: str
+    ) -> bool:
+        """Check an explicit patient reference with parameterized Cypher."""
+        if field_name not in {"patient_id", "name"}:
+            raise ValueError("Unsupported patient reference field")
+
+        if field_name == "patient_id":
+            reference_filter = "toString(p.patient_id) = $patient_reference"
+        else:
+            reference_filter = (
+                "toLower(p.name) = toLower($patient_reference)"
+            )
+        query = (
+            "MATCH (p:Patient) "
+            "WHERE p.attending_doctor_id = $doctor_id "
+            f"AND {reference_filter} "
+            "RETURN count(p) > 0 AS in_scope"
+        )
+        records = self.graph.query(
+            query,
+            params={
+                "doctor_id": doctor_id,
+                "patient_reference": value,
+            },
+        )
+        return bool(records and records[0].get("in_scope"))
+
+    def validate_scope_data_contract(self) -> None:
+        """Refuse startup while any Patient lacks mandatory authorization data."""
+        query = (
+            "MATCH (p:Patient) "
+            "WHERE p.patient_id IS NULL "
+            "OR trim(toString(p.patient_id)) = '' "
+            "OR p.attending_doctor_id IS NULL "
+            "OR trim(toString(p.attending_doctor_id)) = '' "
+            "RETURN count(p) AS invalid_patient_count"
+        )
+        records = self.graph.query(query)
+        invalid_count = (
+            records[0].get("invalid_patient_count", 0) if records else 0
+        )
+        if invalid_count:
+            audit_event(
+                "authorization_data_contract_failed",
+                level="error",
+                invalid_patient_count=invalid_count,
+            )
+            raise ValueError(
+                "Authorization data contract failed: "
+                f"{invalid_count} Patient node(s) are missing patient_id or "
+                "attending_doctor_id"
+            )
+        audit_event("authorization_data_contract_passed")
 
     def get_schema(self) -> Dict[str, Any]:
         """

@@ -17,6 +17,9 @@ from src.helpers.agent_initializer import agent_initializer
 from src.helpers.logging_config import logger
 from src.helpers.prompts import get_healthcare_system_prompt
 from src.handlers.grounding_verifier import select_controlled_agent_response
+from src.helpers.security_context import doctor_security_context
+from src.helpers.tools import set_last_query
+from src.handlers.security_guardrails import check_prompt_injection
 from src.handlers.conversation_handler import (
     store_conversation,
     get_conversation_history,
@@ -60,12 +63,13 @@ def render_conversation_selector():
         Boolean: True if UI state changed and rerun is needed
     """
     st.subheader("Chọn hoặc tạo cuộc hội thoại")
+    doctor_id = st.session_state.get("doctor_id", "").strip()
     conversation_options = []
     conversation_map = {}  # Map UUID to friendly name
 
     # Generate friendly names for all conversations
     for thread_id in st.session_state.conversations:
-        history = get_conversation_history(thread_id)
+        history = get_conversation_history(thread_id, doctor_id)
         friendly_name = generate_conversation_name(history)
         # Thêm UUID ở cuối để đảm bảo không trùng lặp
         display_name = f"{friendly_name} ({thread_id[:6]})"
@@ -91,7 +95,8 @@ def render_conversation_selector():
         if st.session_state.current_thread_id != selected_thread_id:
             st.session_state.current_thread_id = selected_thread_id
             st.session_state.messages = get_conversation_history(
-                selected_thread_id)
+                selected_thread_id, doctor_id
+            )
             # Update URL with selected thread_id
             st.query_params.update(thread_id=selected_thread_id)
             return True
@@ -115,23 +120,43 @@ def process_user_input(agent_executor, user_input):
     with st.chat_message("user"):
         st.write(user_input)
 
+    if check_prompt_injection(user_input):
+        response = (
+            "Yêu cầu này cần được kiểm tra thủ công trước khi truy cập dữ liệu."
+        )
+        st.session_state.messages.append(
+            {"role": "assistant", "content": response}
+        )
+        with st.chat_message("assistant"):
+            st.write(response)
+        return
+
     try:
+        doctor_id = st.session_state.get("doctor_id", "").strip()
+        if not doctor_id:
+            st.error("Vui lòng xác thực Doctor ID trước khi truy cập dữ liệu.")
+            return
         with st.spinner('Đang xử lý câu hỏi của bạn...'):
             # Lấy context đầy đủ từ lịch sử hội thoại
             conversation_context = agent_initializer.get_conversation_context(
-                st.session_state.current_thread_id)
+                st.session_state.current_thread_id, doctor_id
+            )
 
             # Sử dụng prompt chung
             system_content = get_healthcare_system_prompt(conversation_context)
             system_message = SystemMessage(content=system_content)
 
             config = {"configurable": {
-                "thread_id": st.session_state.current_thread_id}}
-            full_response = agent_executor.invoke(
-                {"messages": [system_message,
-                              HumanMessage(content=user_input)]},
-                config
-            )
+                "thread_id": (
+                    f"{doctor_id}:{st.session_state.current_thread_id}"
+                )}}
+            with doctor_security_context(doctor_id):
+                set_last_query(None)
+                full_response = agent_executor.invoke(
+                    {"messages": [system_message,
+                                  HumanMessage(content=user_input)]},
+                    config
+                )
             response = select_controlled_agent_response(full_response)
 
         st.session_state.messages.append(
@@ -141,7 +166,11 @@ def process_user_input(agent_executor, user_input):
 
         # Save to Neo4j
         store_conversation(
-            st.session_state.current_thread_id, user_input, response)
+            st.session_state.current_thread_id,
+            doctor_id,
+            user_input,
+            response,
+        )
     except Exception as e:  # pylint: disable=broad-exception-caught
         # Exceptions need to be caught broadly as this is a top-level UI handler
         logger.error("Error processing question: %s", str(e), exc_info=True)
@@ -154,7 +183,9 @@ def render_memory_tab():
     st.subheader("Bộ nhớ hội thoại")
     if st.session_state.current_thread_id:
         memory = agent_initializer.get_memory(
-            st.session_state.current_thread_id)
+            st.session_state.current_thread_id,
+            st.session_state.get("doctor_id", ""),
+        )
         context = memory.get_conversation_context()
 
         st.markdown("### Lịch sử hội thoại")
@@ -175,9 +206,10 @@ def render_memory_tab():
 def render_conversations_tab():
     """Render the Conversations tab displaying all conversation history."""
     st.subheader("Danh sách các cuộc hội thoại")
+    doctor_id = st.session_state.get("doctor_id", "").strip()
     if st.session_state.conversations:
         for thread_id in st.session_state.conversations:
-            history = get_conversation_history(thread_id)
+            history = get_conversation_history(thread_id, doctor_id)
             friendly_name = generate_conversation_name(history)
 
             # Tạo container có viền và padding
@@ -208,9 +240,15 @@ def main():
     query_params = st.query_params
     if "thread_id" in query_params:
         thread_id = query_params["thread_id"]
-        if "current_thread_id" not in st.session_state or st.session_state.current_thread_id != thread_id:
+        doctor_id = st.session_state.get("doctor_id", "").strip()
+        if doctor_id and (
+            "current_thread_id" not in st.session_state
+            or st.session_state.current_thread_id != thread_id
+        ):
             st.session_state.current_thread_id = thread_id
-            st.session_state.messages = get_conversation_history(thread_id)
+            st.session_state.messages = get_conversation_history(
+                thread_id, doctor_id
+            )
 
     if "current_thread_id" in st.session_state and st.session_state.current_thread_id:
         thread_id_display = f"Thread: {st.session_state.current_thread_id[:8]}..."
@@ -258,8 +296,21 @@ def main():
         agent_executor = agent_initializer.get_agent()
 
         # Initialize session state
-        if "conversations" not in st.session_state:
-            st.session_state.conversations = get_all_conversations()
+        if "doctor_id" not in st.session_state:
+            st.session_state.doctor_id = ""
+        st.sidebar.text_input(
+            "Doctor ID (phải đến từ phiên đăng nhập trong production)",
+            key="doctor_id",
+        )
+        doctor_id = st.session_state.doctor_id.strip()
+
+        if st.session_state.get("loaded_doctor_id") != doctor_id:
+            st.session_state.conversations = (
+                get_all_conversations(doctor_id) if doctor_id else []
+            )
+            st.session_state.current_thread_id = None
+            st.session_state.messages = []
+            st.session_state.loaded_doctor_id = doctor_id
         if "current_thread_id" not in st.session_state:
             st.session_state.current_thread_id = None
         if "messages" not in st.session_state:
@@ -285,7 +336,9 @@ def main():
             # Delete conversation button
             if st.button("Xóa lịch sử cuộc hội thoại hiện tại"):
                 try:
-                    if delete_conversation(st.session_state.current_thread_id):
+                    if delete_conversation(
+                        st.session_state.current_thread_id, doctor_id
+                    ):
                         # Nếu xóa thành công, cập nhật UI
                         st.session_state.conversations.remove(
                             st.session_state.current_thread_id)

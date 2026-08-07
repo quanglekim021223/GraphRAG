@@ -15,6 +15,13 @@ from src.handlers.grounding_verifier import (
 )
 from src.handlers.graph_manager import GraphManager
 from src.handlers.llm_manager import LLMManager
+from src.handlers.security_guardrails import (
+    AuthorizationScopeError,
+    check_input_scope,
+    check_prompt_injection,
+    enforce_scope,
+    validate_result,
+)
 
 
 class HealthcareGraphRAG:
@@ -70,34 +77,81 @@ class HealthcareGraphRAG:
             "attempts": attempts,
         }
 
-    def run(self, question: str) -> Dict[str, Any]:
+    @staticmethod
+    def _guardrail_result(status: str, reason: str, response: str) -> Dict[str, Any]:
+        """Return a controlled response without exposing protected data."""
+        return {
+            "status": status,
+            "query": None,
+            "response": response,
+            "reason": reason,
+            "attempts": 0,
+            "evidence": [],
+        }
+
+    def run(self, question: str, doctor_id: str) -> Dict[str, Any]:
         """
         Run the GraphRAG pipeline on a question.
 
         Args:
             question: User query string
+            doctor_id: Authenticated doctor identity from application context
 
         Returns:
             Dict containing the query and response
         """
         query = None
+        if not doctor_id:
+            return self._guardrail_result(
+                "authorization_denied",
+                "missing_doctor_identity",
+                "Không thể xác định danh tính bác sĩ đã đăng nhập.",
+            )
+        if check_prompt_injection(question):
+            return self._guardrail_result(
+                "manual_review",
+                "suspected_prompt_injection",
+                "Yêu cầu này cần được kiểm tra thủ công trước khi truy cập dữ liệu.",
+            )
+        if not check_input_scope(
+            question,
+            doctor_id,
+            self.graph_manager.patient_reference_in_scope,
+        ):
+            return self._guardrail_result(
+                "authorization_denied",
+                "patient_out_of_scope_or_unverified",
+                "Không thể xác nhận bệnh nhân thuộc phạm vi phụ trách của bác sĩ.",
+            )
+
         try:
             generation = self.llm_manager.generate_cypher_query(
                 question, self.schema
             )
-            query = generation.cypher
+            generated_query = generation.cypher
             response_template = generation.response_template
-            if not validate_template(response_template, query):
+            if not validate_template(response_template, generated_query):
                 logger.warning(
                     "Generated response template was rejected; using "
                     "deterministic rendering"
                 )
                 response_template = None
+            try:
+                query = enforce_scope(generated_query, doctor_id)
+            except AuthorizationScopeError:
+                return self._guardrail_result(
+                    "authorization_denied",
+                    "unsafe_cypher_scope",
+                    "Truy vấn bị từ chối vì không thể áp dụng phạm vi bác sĩ an toàn.",
+                )
 
             for retry_count in range(self.MAX_CYPHER_RETRIES + 1):
                 try:
-                    self.graph_manager.explain_query(query)
-                    query_result = self.graph_manager.execute_query(query)
+                    parameters = {"doctor_id": doctor_id}
+                    self.graph_manager.explain_query(query, parameters)
+                    query_result = self.graph_manager.execute_query(
+                        query, parameters
+                    )
                 except ValueError as error:
                     logger.warning(
                         "Cypher attempt %s/%s failed: %s",
@@ -110,20 +164,36 @@ class HealthcareGraphRAG:
                             query, "max_retries_exceeded", retry_count + 1
                         )
 
-                    generation = self.llm_manager.repair_cypher_query(
+                    repaired = self.llm_manager.repair_cypher_query(
                         question=question,
                         schema=self.schema,
-                        invalid_query=query,
+                        invalid_query=generated_query,
                         diagnostic=str(error),
                     )
-                    query = generation.cypher
-                    response_template = generation.response_template
-                    if not validate_template(response_template, query):
+                    repaired_query = repaired.cypher
+                    if response_template and validate_template(
+                        response_template, repaired_query
+                    ):
+                        pass
+                    elif validate_template(
+                        repaired.response_template, repaired_query
+                    ):
+                        response_template = repaired.response_template
+                    else:
                         logger.warning(
-                            "Repaired response template was rejected; using "
+                            "Old and repaired response templates were rejected; using "
                             "deterministic rendering"
                         )
                         response_template = None
+                    generated_query = repaired_query
+                    try:
+                        query = enforce_scope(generated_query, doctor_id)
+                    except AuthorizationScopeError:
+                        return self._guardrail_result(
+                            "authorization_denied",
+                            "unsafe_repaired_cypher_scope",
+                            "Truy vấn sửa lại bị từ chối vì phạm vi bác sĩ không an toàn.",
+                        )
                     continue
 
                 if not query_result:
@@ -132,8 +202,26 @@ class HealthcareGraphRAG:
                         query, "empty_result", retry_count + 1
                     )
 
+                validation = validate_result(
+                    query_result,
+                    query,
+                    question,
+                    max_rows=self.config.max_result_rows,
+                )
+                if not validation.valid:
+                    return {
+                        "status": "validation_failed",
+                        "query": query,
+                        "response": validation.user_message,
+                        "reason": validation.reason,
+                        "attempts": retry_count + 1,
+                        "evidence": [],
+                    }
+
                 grounded_output = build_grounded_output(
-                    query_result, response_template
+                    validation.rows,
+                    response_template,
+                    validation.field_warnings,
                 )
                 if not grounded_output["grounded"]:
                     logger.warning(
@@ -157,8 +245,18 @@ class HealthcareGraphRAG:
                     "response": grounded_output["answer"],
                     "evidence": grounded_output["evidence"],
                     "omitted_fields": grounded_output["omitted_fields"],
+                    "flagged_for_review": validation.flagged_for_review,
+                    "possible_semantic_mismatch": (
+                        validation.possible_semantic_mismatch
+                    ),
+                    "warnings": validation.warnings,
                     "attempts": retry_count + 1,
                 }
+                if validation.possible_semantic_mismatch:
+                    result["response"] += (
+                        "\n\nCảnh báo: truy vấn có thể chưa phản ánh đầy đủ "
+                        "ý 'mới nhất/gần nhất'; vui lòng xác minh lại."
+                    )
                 logger.info(
                     "Successfully processed query '%s' after %s attempt(s)",
                     question,
