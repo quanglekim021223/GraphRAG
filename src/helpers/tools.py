@@ -80,10 +80,25 @@ def medical_guideline_tool(question: str) -> str:
     if not claim_request_tool("medical_guideline_tool"):
         return TOOL_CHAIN_BLOCKED_RESPONSE
     config = Config()
+    doctor_id = get_current_doctor_id()
     result = search_medical_guidelines(
         question=question,
         api_key=config.tavily_api_key,
         max_results=config.medical_search_max_results,
         min_score=config.medical_search_min_score,
+        actor_id=doctor_id,
+        cache_ttl_seconds=config.medical_search_cache_ttl_seconds,
+        rate_limit_per_minute=config.medical_search_rate_limit_per_minute,
+        daily_budget=config.medical_search_daily_budget,
+        max_retries=config.medical_search_max_retries,
+        max_retry_delay_seconds=(
+            config.medical_search_max_retry_delay_seconds
+        ),
+        circuit_failure_threshold=(
+            config.medical_search_circuit_failure_threshold
+        ),
+        circuit_cooldown_seconds=(
+            config.medical_search_circuit_cooldown_seconds
+        ),
     )
     return str(result["response"])

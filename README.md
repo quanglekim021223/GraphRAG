@@ -247,6 +247,31 @@ the outer ReAct model cannot paraphrase it. Patient identifiers are rejected
 before the network call, and one request may invoke only one data-bearing tool,
 preventing web content from triggering a subsequent patient-data lookup.
 
+Before a citation is accepted, the backend performs a bounded `HEAD` check with
+automatic redirects disabled. Every redirect hop and the final URL must remain
+on an approved HTTPS host/path, and DNS answers containing private, loopback,
+link-local or reserved addresses are rejected. An infrastructure egress proxy
+is still recommended in production to close DNS-rebinding and network-policy
+gaps that application code alone cannot fully eliminate.
+
+The live-search runtime also provides process-local controls:
+
+- normalized-question TTL cache;
+- per-doctor sliding one-minute rate limit;
+- daily provider-call budget;
+- one bounded retry for `429`/`5xx`, respecting `Retry-After` only when it is
+  below the configured blocking-delay cap;
+- circuit breaker after repeated provider failures.
+
+Evidence records include provider URL, validated final URL, retrieval time,
+content hash, score and deterministic source priority. Current priority is
+Ministry of Health documents, WHO, NICE, then CDC. Multiple sources remain
+separate and the system explicitly does not resolve clinical disagreement.
+These controls are in-memory per process; multi-worker production deployments
+must move shared cache/rate/budget/circuit state to Redis or an equivalent
+central store. Live search still lacks authoritative publication-version and
+effective-status tracking; that requires the separate curated-ingestion phase.
+
 ## Hướng dẫn chạy non-Docker
 - **Để chạy Streamlit UI**: 
 ```bash

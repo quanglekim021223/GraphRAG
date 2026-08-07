@@ -30,6 +30,27 @@ class Config:
     medical_search_min_score: float = float(
         os.getenv("MEDICAL_SEARCH_MIN_SCORE", "0.5")
     )
+    medical_search_cache_ttl_seconds: int = int(
+        os.getenv("MEDICAL_SEARCH_CACHE_TTL_SECONDS", "300")
+    )
+    medical_search_rate_limit_per_minute: int = int(
+        os.getenv("MEDICAL_SEARCH_RATE_LIMIT_PER_MINUTE", "10")
+    )
+    medical_search_daily_budget: int = int(
+        os.getenv("MEDICAL_SEARCH_DAILY_BUDGET", "1000")
+    )
+    medical_search_max_retries: int = int(
+        os.getenv("MEDICAL_SEARCH_MAX_RETRIES", "1")
+    )
+    medical_search_max_retry_delay_seconds: float = float(
+        os.getenv("MEDICAL_SEARCH_MAX_RETRY_DELAY_SECONDS", "2")
+    )
+    medical_search_circuit_failure_threshold: int = int(
+        os.getenv("MEDICAL_SEARCH_CIRCUIT_FAILURE_THRESHOLD", "3")
+    )
+    medical_search_circuit_cooldown_seconds: int = int(
+        os.getenv("MEDICAL_SEARCH_CIRCUIT_COOLDOWN_SECONDS", "60")
+    )
 
     _instance = None
 
@@ -55,6 +76,27 @@ class Config:
             )
             self.medical_search_min_score = float(
                 os.getenv("MEDICAL_SEARCH_MIN_SCORE", "0.5")
+            )
+            self.medical_search_cache_ttl_seconds = int(
+                os.getenv("MEDICAL_SEARCH_CACHE_TTL_SECONDS", "300")
+            )
+            self.medical_search_rate_limit_per_minute = int(
+                os.getenv("MEDICAL_SEARCH_RATE_LIMIT_PER_MINUTE", "10")
+            )
+            self.medical_search_daily_budget = int(
+                os.getenv("MEDICAL_SEARCH_DAILY_BUDGET", "1000")
+            )
+            self.medical_search_max_retries = int(
+                os.getenv("MEDICAL_SEARCH_MAX_RETRIES", "1")
+            )
+            self.medical_search_max_retry_delay_seconds = float(
+                os.getenv("MEDICAL_SEARCH_MAX_RETRY_DELAY_SECONDS", "2")
+            )
+            self.medical_search_circuit_failure_threshold = int(
+                os.getenv("MEDICAL_SEARCH_CIRCUIT_FAILURE_THRESHOLD", "3")
+            )
+            self.medical_search_circuit_cooldown_seconds = int(
+                os.getenv("MEDICAL_SEARCH_CIRCUIT_COOLDOWN_SECONDS", "60")
             )
             self._initialized = True
 
