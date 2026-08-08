@@ -1,37 +1,85 @@
-"""Bounded patient-record plus curated-guideline workflow.
+"""Policy-driven patient-record plus curated-guideline workflow.
 
-The outer agent may select this workflow for an explicit drug-interaction
-question, but it cannot freely chain data-bearing tools. Patient facts stay in
-the authorized GraphRAG path; only medication names are copied into the
-de-identified curated-guideline query. Final output keeps patient and guideline
-evidence separate and never asks an LLM to synthesize a clinical conclusion.
+The outer agent selects one bounded clinical intent. Python policy then decides
+which patient fields may be retrieved and copied into a de-identified guideline
+query. Administrative fields and patient identifiers never cross that boundary.
+Patient and guideline evidence stay separate; no LLM synthesizes a diagnosis.
 """
 import re
-from typing import Any, Callable, Dict, Iterable, List, Sequence
+from dataclasses import dataclass
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+)
 
 from src.handlers.grounding_verifier import format_grounded_response
 from src.handlers.medical_guideline_search import contains_sensitive_patient_data
-from src.handlers.security_guardrails import (
-    audit_event,
-    extract_patient_reference,
-)
+from src.handlers.security_guardrails import audit_event, extract_patient_reference
 
 
-MAX_TARGET_MEDICATIONS = 5
-MAX_MEDICATION_NAME_LENGTH = 100
-MEDICATION_FIELD_PATTERN = re.compile(
-    r"(?:^|_)(?:medication|medicine|drug)(?:_|$)", re.IGNORECASE
-)
-SAFE_MEDICATION_PATTERN = re.compile(
+MAX_EXPLICIT_TERMS = 5
+MAX_FACTS = 10
+MAX_FACT_LENGTH = 100
+SAFE_FACT_PATTERN = re.compile(
     r"^[A-Za-zÀ-ỹ0-9][A-Za-zÀ-ỹ0-9 .,'()/+\-]*$"
 )
+
+
+@dataclass(frozen=True)
+class CompositePolicy:
+    """Allowlisted patient facts and handoff behavior for one clinical intent."""
+
+    patient_question: str
+    patient_aliases: Tuple[str, ...]
+    handoff_label: str
+    requires_explicit_terms: bool = False
+
+
+COMPOSITE_POLICIES: Mapping[str, CompositePolicy] = {
+    "drug_interaction": CompositePolicy(
+        patient_question=(
+            "Liệt kê tên thuốc đang được ghi nhận cho {patient}; "
+            "trả về tên thuốc với alias medication_name."
+        ),
+        patient_aliases=("medication_name", "medicine_name", "drug_name"),
+        handoff_label=(
+            "Drug interaction, contraindication, or medication safety guidance "
+            "for concurrent use of"
+        ),
+        requires_explicit_terms=True,
+    ),
+    "disease_guideline": CompositePolicy(
+        patient_question=(
+            "Liệt kê bệnh hoặc chẩn đoán đang được ghi nhận cho {patient}; "
+            "trả về tên bệnh với alias disease_name."
+        ),
+        patient_aliases=("disease_name", "medical_condition", "condition_name"),
+        handoff_label="Clinical guideline for recorded condition",
+    ),
+    "blood_type_compatibility": CompositePolicy(
+        patient_question=(
+            "Cho biết nhóm máu đang được ghi nhận cho {patient}; "
+            "trả về nhóm máu với alias blood_type."
+        ),
+        patient_aliases=("blood_type",),
+        handoff_label="Blood transfusion compatibility guidance for blood type",
+    ),
+}
+
 COMPOSITE_CLARIFICATION = (
-    "Vui lòng nêu rõ tên thuốc và bệnh nhân cần kiểm tra. Hệ thống chỉ đối "
-    "chiếu thuốc được nêu rõ với thuốc đang được ghi nhận trong hồ sơ đã phân quyền."
+    "Vui lòng nêu rõ một bệnh nhân và mục đích đối chiếu guideline. Với tương "
+    "tác thuốc, hãy ghi rõ tên thuốc cần kiểm tra."
 )
-NO_PATIENT_MEDICATIONS = (
-    "Không tìm thấy tên thuốc có thể kiểm chứng trong kết quả bệnh án. "
-    "Vui lòng kiểm tra lại bệnh nhân hoặc hỏi cụ thể hơn."
+NO_ALLOWED_FACTS = (
+    "Không tìm thấy dữ kiện lâm sàng phù hợp với mục đích đã chọn trong kết quả "
+    "bệnh án. Vui lòng kiểm tra lại bệnh nhân hoặc hỏi cụ thể hơn."
 )
 COMPOSITE_SAFETY_NOTE = (
     "Các dữ kiện bệnh án và nội dung guideline được hiển thị riêng; hệ thống "
@@ -41,31 +89,37 @@ COMPOSITE_SAFETY_NOTE = (
 
 def run_patient_guideline_workflow(
     question: str,
-    target_medications: Sequence[str],
+    intent: str,
+    explicit_terms: Sequence[str],
     doctor_id: str,
     graphrag: Any,
     guideline_retriever: Callable[..., Dict[str, Any]],
     guideline_options: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """Run one authorized GraphRAG lookup then one de-identified retrieval."""
+    """Run one authorized lookup and one policy-filtered guideline retrieval."""
+    policy = COMPOSITE_POLICIES.get(intent)
+    if policy is None:
+        return _clarification("unsupported_composite_intent")
+
     patient_reference = extract_patient_reference(question)
     if patient_reference is None:
         return _clarification("missing_patient_reference")
 
     reference_field, reference_value = patient_reference
-    targets = _validate_target_medications(
-        question, target_medications, reference_value
-    )
-    if not targets:
-        return _clarification("missing_or_unverified_target_medication")
+    terms = _validate_explicit_terms(question, explicit_terms, reference_value)
+    if terms is None or (policy.requires_explicit_terms and not terms):
+        return _clarification("missing_or_unverified_explicit_terms")
+    if not policy.requires_explicit_terms and terms:
+        return _clarification("unexpected_explicit_terms")
 
-    patient_question = _patient_medication_question(
-        reference_field, reference_value
+    patient_question = policy.patient_question.format(
+        patient=_patient_description(reference_field, reference_value)
     )
     patient_result = graphrag.run(patient_question, doctor_id)
     if patient_result.get("status") != "success":
         audit_event(
             "patient_guideline_patient_lookup_stopped",
+            intent=intent,
             status=patient_result.get("status"),
             reason=patient_result.get("reason"),
         )
@@ -78,21 +132,28 @@ def run_patient_guideline_workflow(
             "guideline_evidence": [],
         }
 
-    current_medications = _extract_medications(patient_result.get("result", []))
-    if not current_medications:
-        audit_event("patient_guideline_no_patient_medications", level="warning")
+    patient_facts = _extract_allowed_facts(
+        patient_result.get("result", []), policy.patient_aliases
+    )
+    if not patient_facts:
+        audit_event(
+            "patient_guideline_no_allowed_facts", level="warning", intent=intent
+        )
         return {
             "status": "needs_clarification",
-            "response": NO_PATIENT_MEDICATIONS,
+            "response": NO_ALLOWED_FACTS,
             "patient_evidence": patient_result.get("evidence", []),
             "guideline_evidence": [],
         }
 
-    guideline_question = _build_guideline_question(targets, current_medications)
+    guideline_question = _build_guideline_question(
+        intent, policy, terms, patient_facts
+    )
+    handoff_values = [*terms, *patient_facts]
     if (
         any(
-            _contains_patient_reference(name, reference_value)
-            for name in [*targets, *current_medications]
+            _contains_patient_reference(value, reference_value)
+            for value in handoff_values
         )
         or _contains_explicit_phrase(
             guideline_question.casefold(), reference_value.casefold()
@@ -102,6 +163,7 @@ def run_patient_guideline_workflow(
         audit_event(
             "patient_guideline_handoff_rejected",
             level="warning",
+            intent=intent,
             reason="sensitive_data_detected",
         )
         return {
@@ -118,13 +180,11 @@ def run_patient_guideline_workflow(
         question=guideline_question,
         **guideline_options,
     )
-    patient_output = format_grounded_response(patient_result)
-    guideline_output = str(guideline_result.get("response") or "")
     response = (
         "Dữ liệu bệnh án đã phân quyền:\n"
-        f"{patient_output}\n\n"
+        f"{format_grounded_response(patient_result)}\n\n"
         "Nội dung guideline đã duyệt và còn hiệu lực:\n"
-        f"{guideline_output}\n\n"
+        f"{str(guideline_result.get('response') or '')}\n\n"
         f"{COMPOSITE_SAFETY_NOTE}"
     )
     status = (
@@ -134,9 +194,10 @@ def run_patient_guideline_workflow(
     )
     audit_event(
         "patient_guideline_workflow_completed",
+        intent=intent,
         status=status,
-        patient_medication_count=len(current_medications),
-        target_medication_count=len(targets),
+        patient_fact_count=len(patient_facts),
+        explicit_term_count=len(terms),
         guideline_status=guideline_result.get("status"),
     )
     return {
@@ -145,95 +206,99 @@ def run_patient_guideline_workflow(
         "patient_evidence": patient_result.get("evidence", []),
         "guideline_evidence": guideline_result.get("evidence", []),
         "guideline_query": guideline_question,
+        "intent": intent,
     }
 
 
-def _validate_target_medications(
+def _validate_explicit_terms(
     question: str,
-    target_medications: Sequence[str],
+    explicit_terms: Sequence[str],
     patient_reference: str,
-) -> List[str]:
-    """Accept only bounded medication names copied from the current question."""
+) -> Optional[List[str]]:
+    """Accept only bounded terms copied exactly from the trusted question."""
     if (
-        isinstance(target_medications, (str, bytes))
-        or not isinstance(target_medications, Sequence)
-        or len(target_medications) > MAX_TARGET_MEDICATIONS
+        isinstance(explicit_terms, (str, bytes))
+        or not isinstance(explicit_terms, Sequence)
+        or len(explicit_terms) > MAX_EXPLICIT_TERMS
     ):
-        return []
+        return None
 
     question_folded = (question or "").casefold()
     accepted: List[str] = []
     seen = set()
-    for raw_name in target_medications:
-        if not isinstance(raw_name, str):
-            return []
-        name = raw_name.strip()
-        folded = name.casefold()
+    for raw_value in explicit_terms:
+        if not isinstance(raw_value, str):
+            return None
+        value = raw_value.strip()
+        folded = value.casefold()
         if (
-            not name
-            or len(name) > MAX_MEDICATION_NAME_LENGTH
-            or not SAFE_MEDICATION_PATTERN.fullmatch(name)
+            not value
+            or len(value) > MAX_FACT_LENGTH
+            or not SAFE_FACT_PATTERN.fullmatch(value)
             or not _contains_explicit_phrase(question_folded, folded)
-            or _contains_patient_reference(name, patient_reference)
+            or _contains_patient_reference(value, patient_reference)
         ):
-            return []
+            return None
         if folded not in seen:
             seen.add(folded)
-            accepted.append(name)
+            accepted.append(value)
     return accepted
 
 
-def _patient_medication_question(field_name: str, value: str) -> str:
+def _patient_description(field_name: str, value: str) -> str:
     if field_name == "patient_id":
-        return (
-            "Liệt kê tên thuốc đang được ghi nhận cho bệnh nhân có "
-            f"patient_id: {value}."
-        )
+        return f"bệnh nhân có patient_id: {value}"
     escaped = value.replace('"', "")
-    return (
-        "Liệt kê tên thuốc đang được ghi nhận cho bệnh nhân "
-        f'"{escaped}".'
-    )
+    return f'bệnh nhân "{escaped}"'
 
 
-def _extract_medications(rows: Iterable[Dict[str, Any]]) -> List[str]:
-    medications: List[str] = []
+def _extract_allowed_facts(
+    rows: Iterable[Dict[str, Any]], allowed_aliases: Sequence[str]
+) -> List[str]:
+    """Copy only scalar values under aliases allowlisted by the selected policy."""
+    facts: List[str] = []
     seen = set()
+    allowed = {alias.casefold() for alias in allowed_aliases}
     for row in rows if isinstance(rows, list) else []:
         if not isinstance(row, dict):
             continue
-        for field, value in row.items():
+        for field, raw_value in row.items():
             if (
                 not isinstance(field, str)
-                or not MEDICATION_FIELD_PATTERN.search(field)
-                or not isinstance(value, str)
+                or field.casefold() not in allowed
+                or not isinstance(raw_value, (str, int, float))
+                or isinstance(raw_value, bool)
             ):
                 continue
-            medication = value.strip()
-            folded = medication.casefold()
+            value = str(raw_value).strip()
+            folded = value.casefold()
             if (
-                medication
-                and len(medication) <= MAX_MEDICATION_NAME_LENGTH
-                and SAFE_MEDICATION_PATTERN.fullmatch(medication)
+                value
+                and len(value) <= MAX_FACT_LENGTH
+                and SAFE_FACT_PATTERN.fullmatch(value)
                 and folded not in seen
             ):
                 seen.add(folded)
-                medications.append(medication)
-    return medications
+                facts.append(value)
+                if len(facts) >= MAX_FACTS:
+                    return facts
+    return facts
 
 
 def _build_guideline_question(
-    targets: Sequence[str], current_medications: Sequence[str]
+    intent: str,
+    policy: CompositePolicy,
+    explicit_terms: Sequence[str],
+    patient_facts: Sequence[str],
 ) -> str:
-    medications = _deduplicate([*targets, *current_medications])
-    return (
-        "Drug interaction, contraindication, or medication safety guidance "
-        "for concurrent use of: " + ", ".join(medications)
-    )
+    if intent == "drug_interaction":
+        values = _deduplicate([*explicit_terms, *patient_facts])
+        return f"{policy.handoff_label}: {', '.join(values)}"
+    return f"{policy.handoff_label}: {', '.join(patient_facts)}"
 
 
 def _contains_explicit_phrase(text: str, phrase: str) -> bool:
-    """Match a copied name without accepting a substring of another token."""
+    """Match a copied value without accepting a substring of another token."""
     return bool(re.search(
         rf"(?<!\w){re.escape(phrase)}(?!\w)", text, re.IGNORECASE
     ))

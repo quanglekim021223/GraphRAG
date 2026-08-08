@@ -323,28 +323,33 @@ URL, publication date and version; the outer ReAct model cannot rewrite them.
 Different sources remain separate and the system does not resolve clinical
 disagreement automatically.
 
-### Bounded patient-guideline medication workflow
+### Policy-driven patient-guideline workflow
 
-Questions that explicitly name both a patient and a target medication can use
-one controlled composite path:
+Questions that require both one authorized patient record and reviewed medical
+guidance use one controlled composite path:
 
 ```text
 patient_guideline_tool
-→ extract explicit patient reference and target medication names
-→ GraphRAG lookup for recorded medications inside doctor scope
-→ build a medication-only query with no patient identity/history
+→ select an allowlisted clinical intent
+→ GraphRAG lookup for the minimum required facts inside doctor scope
+→ policy-filter fields and remove patient identity/history
 → retrieve reviewed, effective guideline sections
 → return patient evidence [E*] and guideline evidence [G*] separately
 → END (return_direct; no outer-agent paraphrase)
 ```
 
-The target medication must be copied from the current question. Unresolved
-phrases such as "thuốc này" fail closed to clarification. The guideline handoff
-contains only validated medication names from the question and authorized graph
-rows; it never contains patient name, ID, doctor ID, room or conversation
-history. The workflow displays record facts and extractive guideline sections
-side by side and does not infer causality, diagnose, prescribe, or resolve
-disagreement between sources.
+Supported intents are drug interaction, recorded-condition guidance and
+blood-type transfusion compatibility. Medication names must be copied from the
+current question; unresolved phrases such as "thuốc này" fail closed to
+clarification. Test-result interpretation remains unsupported because the
+current graph stores only a generic outcome, without test name, unit or reference
+range; associating it with a test named by the user would be ungrounded.
+Each intent has a Python allowlist for aliases that may enter the de-identified
+handoff. Patient name/ID, doctor, hospital, room, admission, insurance, billing
+and conversation history never enter guideline retrieval. Those administrative
+facts remain GraphRAG-only. The workflow displays record facts and extractive
+guideline sections side by side and does not infer causality, diagnose,
+prescribe, or resolve disagreement between sources.
 
 The SQLite cosine scan is intentionally sized for a small curated corpus. A
 large corpus should move the same metadata contract to a real vector index.

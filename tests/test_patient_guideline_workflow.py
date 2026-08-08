@@ -70,7 +70,8 @@ class PatientGuidelineWorkflowTests(unittest.TestCase):
                 "Ibuprofen có tương tác với thuốc bệnh nhân \"Alice\" "
                 "đang dùng không?"
             ),
-            target_medications=["Ibuprofen"],
+            intent="drug_interaction",
+            explicit_terms=["Ibuprofen"],
             doctor_id="doctor-1",
             graphrag=graph,
             guideline_retriever=retriever,
@@ -96,7 +97,8 @@ class PatientGuidelineWorkflowTests(unittest.TestCase):
 
         result = run_patient_guideline_workflow(
             question='Thuốc này có ảnh hưởng đến bệnh nhân "Alice" không?',
-            target_medications=["Ibuprofen"],
+            intent="drug_interaction",
+            explicit_terms=["Ibuprofen"],
             doctor_id="doctor-1",
             graphrag=graph,
             guideline_retriever=retriever,
@@ -113,7 +115,8 @@ class PatientGuidelineWorkflowTests(unittest.TestCase):
 
         result = run_patient_guideline_workflow(
             question='Kiểm tra Alice cho bệnh nhân "Alice".',
-            target_medications=["Alice"],
+            intent="drug_interaction",
+            explicit_terms=["Alice"],
             doctor_id="doctor-1",
             graphrag=graph,
             guideline_retriever=retriever,
@@ -139,7 +142,8 @@ class PatientGuidelineWorkflowTests(unittest.TestCase):
 
         result = run_patient_guideline_workflow(
             question="Ibuprofen có ảnh hưởng đến bệnh nhân A không?",
-            target_medications=["Ibuprofen"],
+            intent="drug_interaction",
+            explicit_terms=["Ibuprofen"],
             doctor_id="doctor-1",
             graphrag=graph,
             guideline_retriever=retriever,
@@ -155,7 +159,8 @@ class PatientGuidelineWorkflowTests(unittest.TestCase):
 
         result = run_patient_guideline_workflow(
             question="Ibuprofen có tương tác với Warfarin không?",
-            target_medications=["Ibuprofen"],
+            intent="drug_interaction",
+            explicit_terms=["Ibuprofen"],
             doctor_id="doctor-1",
             graphrag=graph,
             guideline_retriever=retriever,
@@ -179,7 +184,8 @@ class PatientGuidelineWorkflowTests(unittest.TestCase):
 
         result = run_patient_guideline_workflow(
             question='Ibuprofen có ảnh hưởng bệnh nhân "Alice" không?',
-            target_medications=["Ibuprofen"],
+            intent="drug_interaction",
+            explicit_terms=["Ibuprofen"],
             doctor_id="doctor-1",
             graphrag=graph,
             guideline_retriever=retriever,
@@ -195,7 +201,8 @@ class PatientGuidelineWorkflowTests(unittest.TestCase):
 
         result = run_patient_guideline_workflow(
             question='Ibuprofen có ảnh hưởng bệnh nhân "Alice" không?',
-            target_medications=["Ibuprofen"],
+            intent="drug_interaction",
+            explicit_terms=["Ibuprofen"],
             doctor_id="doctor-1",
             graphrag=graph,
             guideline_retriever=retriever,
@@ -205,6 +212,126 @@ class PatientGuidelineWorkflowTests(unittest.TestCase):
         self.assertEqual("guideline_evidence_unavailable", result["status"])
         self.assertIn("Không tìm thấy section", result["response"])
         self.assertIn("không tự kết luận", result["response"])
+
+    def test_disease_guideline_uses_only_condition_alias(self):
+        graph = FakeGraphRAG(
+            {
+                "status": "success",
+                "response": "- Alice có Hypertension. [E1]",
+                "result": [{
+                    "patient_name": "Alice",
+                    "disease_name": "Hypertension",
+                    "hospital_name": "City Hospital",
+                }],
+                "evidence": [{"id": "E1", "sources": []}],
+            }
+        )
+        retriever = FakeGuidelineRetriever()
+
+        result = run_patient_guideline_workflow(
+            question='Guideline nào liên quan đến bệnh nền của bệnh nhân "Alice"?',
+            intent="disease_guideline",
+            explicit_terms=[],
+            doctor_id="doctor-1",
+            graphrag=graph,
+            guideline_retriever=retriever,
+            guideline_options={},
+        )
+
+        self.assertEqual("success", result["status"])
+        guideline_question = retriever.calls[0]["question"]
+        self.assertIn("Hypertension", guideline_question)
+        self.assertNotIn("Alice", guideline_question)
+        self.assertNotIn("City Hospital", guideline_question)
+
+    def test_blood_type_compatibility_has_bounded_handoff(self):
+        graph = FakeGraphRAG(
+            {
+                "status": "success",
+                "response": "- Nhóm máu được ghi nhận là O+. [E1]",
+                "result": [{"blood_type": "O+", "room_number": 101}],
+                "evidence": [{"id": "E1", "sources": []}],
+            }
+        )
+        retriever = FakeGuidelineRetriever()
+
+        result = run_patient_guideline_workflow(
+            question='Nhóm máu của bệnh nhân "Alice" tương thích truyền máu thế nào?',
+            intent="blood_type_compatibility",
+            explicit_terms=[],
+            doctor_id="doctor-1",
+            graphrag=graph,
+            guideline_retriever=retriever,
+            guideline_options={},
+        )
+
+        self.assertEqual("success", result["status"])
+        guideline_question = retriever.calls[0]["question"]
+        self.assertIn("O+", guideline_question)
+        self.assertNotIn("101", guideline_question)
+
+    def test_test_result_intent_is_rejected_until_schema_can_ground_it(self):
+        graph = FakeGraphRAG()
+        retriever = FakeGuidelineRetriever()
+
+        result = run_patient_guideline_workflow(
+            question='Kết quả xét nghiệm INR của bệnh nhân "Alice" có ý nghĩa gì?',
+            intent="test_result_guideline",
+            explicit_terms=["INR"],
+            doctor_id="doctor-1",
+            graphrag=graph,
+            guideline_retriever=retriever,
+            guideline_options={},
+        )
+
+        self.assertEqual("needs_clarification", result["status"])
+        self.assertEqual([], graph.calls)
+        self.assertEqual([], retriever.calls)
+
+    def test_policy_rejects_admin_only_rows(self):
+        graph = FakeGraphRAG(
+            {
+                "status": "success",
+                "response": "- Hospital: City Hospital. [E1]",
+                "result": [{
+                    "hospital_name": "City Hospital",
+                    "billing_amount": 1200,
+                }],
+                "evidence": [],
+            }
+        )
+        retriever = FakeGuidelineRetriever()
+
+        result = run_patient_guideline_workflow(
+            question='Guideline nào liên quan đến bệnh nền của bệnh nhân "Alice"?',
+            intent="disease_guideline",
+            explicit_terms=[],
+            doctor_id="doctor-1",
+            graphrag=graph,
+            guideline_retriever=retriever,
+            guideline_options={},
+        )
+
+        self.assertEqual("needs_clarification", result["status"])
+        self.assertEqual([], retriever.calls)
+
+    def test_unknown_intent_fails_before_patient_lookup(self):
+        graph = FakeGraphRAG()
+        retriever = FakeGuidelineRetriever()
+
+        result = run_patient_guideline_workflow(
+            question='Thông tin của bệnh nhân "Alice"?',
+            intent="hospital_guideline",
+            explicit_terms=[],
+            doctor_id="doctor-1",
+            graphrag=graph,
+            guideline_retriever=retriever,
+            guideline_options={},
+        )
+
+        self.assertEqual("needs_clarification", result["status"])
+        self.assertEqual([], graph.calls)
+        self.assertEqual([], retriever.calls)
 
 
 if __name__ == "__main__":

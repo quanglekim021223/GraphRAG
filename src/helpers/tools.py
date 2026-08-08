@@ -5,7 +5,7 @@ This module provides grounded Neo4j lookup and curated medical-guideline
 retrieval. No tool lets the outer ReAct agent rewrite controlled output.
 """
 from contextvars import ContextVar
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
@@ -39,13 +39,25 @@ _LAST_QUERY: ContextVar[Optional[str]] = ContextVar("last_query", default=None)
 
 
 class PatientGuidelineToolInput(BaseModel):
-    """Explicit composite intent selected by the outer tool-calling model."""
+    """Bounded composite intent selected by the outer tool-calling model."""
 
-    target_medications: List[str] = Field(
+    intent: Literal[
+        "drug_interaction",
+        "disease_guideline",
+        "blood_type_compatibility",
+    ] = Field(
         description=(
-            "Medication names explicitly written in the current question. "
-            "Do not infer names from pronouns or invent missing medications."
+            "Approved clinical purpose for combining patient facts with the "
+            "reviewed guideline corpus."
         )
+    )
+    explicit_terms: List[str] = Field(
+        default_factory=list,
+        description=(
+            "For drug_interaction, medication names explicitly written in the "
+            "current question. Empty for all other intents. Never infer terms "
+            "from pronouns or conversation history."
+        ),
     )
 
 
@@ -115,20 +127,26 @@ def medical_guideline_tool() -> str:
 
 @tool(return_direct=True, args_schema=PatientGuidelineToolInput)
 def patient_guideline_tool(
-    target_medications: List[str],
+    intent: Literal[
+        "drug_interaction",
+        "disease_guideline",
+        "blood_type_compatibility",
+    ],
+    explicit_terms: List[str],
 ) -> str:
-    """Check explicit drugs against one authorized patient's recorded drugs.
+    """Combine one authorized patient's allowed facts with reviewed guidance.
 
-    This is the only approved multi-source path. It retrieves patient medication
-    facts first, creates a medication-only handoff, then retrieves reviewed and
-    effective guideline sections. It does not diagnose or recommend treatment.
+    Python policy limits each intent to medication, condition, test outcome or
+    blood type fields. It strips patient identity before guideline retrieval and
+    never forwards administrative or financial record fields.
     """
     if not claim_request_tool("patient_guideline_tool"):
         return TOOL_CHAIN_BLOCKED_RESPONSE
     config = Config()
     result = run_patient_guideline_workflow(
         question=get_current_user_question(),
-        target_medications=target_medications,
+        intent=intent,
+        explicit_terms=explicit_terms,
         doctor_id=get_current_doctor_id(),
         graphrag=graphrag_instance,
         guideline_retriever=retrieve_curated_guidelines,
