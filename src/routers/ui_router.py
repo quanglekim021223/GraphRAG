@@ -150,7 +150,7 @@ def process_user_input(agent_executor, user_input):
                 "thread_id": (
                     f"{doctor_id}:{st.session_state.current_thread_id}"
                 )}}
-            with doctor_security_context(doctor_id):
+            with doctor_security_context(doctor_id, user_input):
                 set_last_query(None)
                 full_response = agent_executor.invoke(
                     {"messages": [system_message,

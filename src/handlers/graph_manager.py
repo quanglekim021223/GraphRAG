@@ -50,7 +50,7 @@ class GraphManager:
                 username=self.config.neo4j_username,
                 password=self.config.neo4j_password
             )
-            self.graph.run("RETURN 1")  # Test connection
+            self.graph.query("RETURN 1")  # Test connection
             self.schema = self.graph.get_structured_schema
             self.validate_scope_data_contract()
             logger.info("Neo4j schema loaded successfully.")

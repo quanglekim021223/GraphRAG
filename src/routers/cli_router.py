@@ -60,7 +60,7 @@ def run_cli():
             }}
 
             # Invoke agent and get full response
-            with doctor_security_context(doctor_id):
+            with doctor_security_context(doctor_id, question):
                 set_last_query(None)
                 full_response = agent_executor.invoke(
                     {"messages": [system_message, HumanMessage(content=question)]},

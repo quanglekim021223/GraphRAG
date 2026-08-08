@@ -22,7 +22,7 @@ Healthcare GraphRAG là một hệ thống chatbot thông minh kết hợp cơ s
 ## ✨ Tính năng nổi bật
 
 - **Truy vấn thông minh**: Tự động chuyển đổi câu hỏi ngôn ngữ tự nhiên thành truy vấn Cypher chính xác
-- **Cơ chế ReAct Agent**: Định tuyến giữa GraphRAG bệnh án và curated guideline corpus đã duyệt
+- **Cơ chế ReAct Agent**: Định tuyến giữa GraphRAG bệnh án, curated guideline corpus và workflow đối chiếu thuốc đa nguồn có giới hạn
 - **Đa ngữ**: Hỗ trợ tiếng Việt và tiếng Anh
 - **Lưu trữ hội thoại**: Lưu và quản lý các cuộc hội thoại trong cơ sở dữ liệu Neo4j
 - **Đa nền tảng**: Giao diện web (Streamlit), API (FastAPI) và CLI
@@ -98,6 +98,8 @@ Healthcare GraphRAG là một ứng dụng theo mô hình kiến trúc phân l�
 3. **Lớp công cụ**:
    - GraphRAG (Truy xuất dữ liệu từ Neo4j và tăng cường câu trả lời)
    - Medical Guideline Tool (Tìm kiếm retrieval-only trên nguồn y khoa allowlist, kèm citation)
+   - Patient Guideline Tool (đối chiếu thuốc được nêu rõ với thuốc trong hồ sơ,
+     chỉ chuyển medication names đã khử định danh sang curated corpus)
 
 4. **Lớp dữ liệu**:
    - Neo4j Graph Database (dữ liệu y tế và lịch sử hội thoại)
@@ -229,6 +231,9 @@ queries such as `UNION`, subqueries and `WITH` pipelines are rejected because th
 local scope rewriter intentionally supports only a small auditable subset.
 LangGraph checkpoint thread IDs, saved conversations and last-query metadata are
 also doctor-scoped/request-local to prevent cross-request history leakage.
+The immutable current-turn question is bound to the same request-local security
+context, so tools do not trust an LLM-supplied copy that could change a patient
+reference before authorization or retrieval.
 
 ### Curated medical guideline corpus
 
@@ -256,7 +261,8 @@ URLs are accepted only when HTTPS host and path match the local allowlist in
 
 Discovery snippets are never inserted or approved automatically. Patient
 identifiers are rejected before any external call, and one chat request may
-invoke only one data-bearing tool.
+invoke only one outer data-bearing tool. The bounded composite tool below is the
+only exception that can consult both stores internally.
 
 Before a citation is accepted, the backend performs a bounded `HEAD` check with
 automatic redirects disabled. Every redirect hop and the final URL must remain
@@ -316,6 +322,29 @@ are eligible. Responses contain verbatim section text, title, heading, source
 URL, publication date and version; the outer ReAct model cannot rewrite them.
 Different sources remain separate and the system does not resolve clinical
 disagreement automatically.
+
+### Bounded patient-guideline medication workflow
+
+Questions that explicitly name both a patient and a target medication can use
+one controlled composite path:
+
+```text
+patient_guideline_tool
+→ extract explicit patient reference and target medication names
+→ GraphRAG lookup for recorded medications inside doctor scope
+→ build a medication-only query with no patient identity/history
+→ retrieve reviewed, effective guideline sections
+→ return patient evidence [E*] and guideline evidence [G*] separately
+→ END (return_direct; no outer-agent paraphrase)
+```
+
+The target medication must be copied from the current question. Unresolved
+phrases such as "thuốc này" fail closed to clarification. The guideline handoff
+contains only validated medication names from the question and authorized graph
+rows; it never contains patient name, ID, doctor ID, room or conversation
+history. The workflow displays record facts and extractive guideline sections
+side by side and does not infer causality, diagnose, prescribe, or resolve
+disagreement between sources.
 
 The SQLite cosine scan is intentionally sized for a small curated corpus. A
 large corpus should move the same metadata contract to a real vector index.

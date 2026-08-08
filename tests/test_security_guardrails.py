@@ -12,6 +12,7 @@ from src.helpers.security_context import (
     claim_request_tool,
     doctor_security_context,
     get_current_doctor_id,
+    get_current_user_question,
 )
 
 
@@ -157,6 +158,18 @@ class DoctorSecurityContextTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "identity is missing"):
             get_current_doctor_id()
+
+    def test_question_is_request_local_and_removed_after_request(self):
+        with self.assertRaisesRegex(ValueError, "question is missing"):
+            get_current_user_question()
+
+        with doctor_security_context("doctor-1", "Original patient question"):
+            self.assertEqual(
+                "Original patient question", get_current_user_question()
+            )
+
+        with self.assertRaisesRegex(ValueError, "question is missing"):
+            get_current_user_question()
 
     def test_only_one_data_tool_can_be_claimed_per_request(self):
         with doctor_security_context("doctor-1"):

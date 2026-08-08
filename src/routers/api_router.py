@@ -80,7 +80,7 @@ def create_app():
 
             # Gọi agent
             # X-Doctor-ID must be injected from verified auth claims/gateway in production.
-            with doctor_security_context(doctor_id):
+            with doctor_security_context(doctor_id, question):
                 set_last_query(None)
                 full_response = await agent_executor.ainvoke(
                     {"messages": [system_message, HumanMessage(content=question)]},

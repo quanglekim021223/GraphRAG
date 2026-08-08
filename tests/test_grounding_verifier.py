@@ -228,6 +228,29 @@ class GroundingVerifierTests(unittest.TestCase):
 
         self.assertEqual("Nguồn hướng dẫn [S1]", selected)
 
+    def test_composite_tool_output_is_returned_without_react_rewrite(self):
+        full_response = {
+            "messages": [
+                {
+                    "type": "human",
+                    "content": "Ibuprofen có ảnh hưởng đến Alice không?",
+                },
+                {
+                    "type": "tool",
+                    "name": "patient_guideline_tool",
+                    "content": "Bệnh án [E1]\nGuideline [G1]",
+                },
+                {
+                    "type": "ai",
+                    "content": "Hai thuốc chắc chắn nguy hiểm.",
+                },
+            ]
+        }
+
+        selected = select_controlled_agent_response(full_response)
+
+        self.assertEqual("Bệnh án [E1]\nGuideline [G1]", selected)
+
     def test_direct_react_medical_answer_is_blocked(self):
         full_response = {
             "messages": [

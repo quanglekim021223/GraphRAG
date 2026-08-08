@@ -257,6 +257,10 @@ def select_controlled_agent_response(full_response: Dict[str, Any]) -> str:
             break
 
     for message in reversed(current_turn):
+        if _message_value(message, "name") == "patient_guideline_tool":
+            return str(_message_value(message, "content") or OUT_OF_SCOPE_RESPONSE)
+
+    for message in reversed(current_turn):
         if _message_value(message, "name") == "rag_tool":
             return str(_message_value(message, "content") or "No information found")
 
