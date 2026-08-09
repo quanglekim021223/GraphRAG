@@ -136,8 +136,8 @@ def patient_guideline_tool(
 ) -> str:
     """Combine one authorized patient's allowed facts with reviewed guidance.
 
-    Python policy limits each intent to medication, condition, test outcome or
-    blood type fields. It strips patient identity before guideline retrieval and
+    Python policy limits each intent to medication, condition or blood type
+    fields. It strips patient identity before guideline retrieval and
     never forwards administrative or financial record fields.
     """
     if not claim_request_tool("patient_guideline_tool"):

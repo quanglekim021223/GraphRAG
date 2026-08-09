@@ -11,6 +11,8 @@
 
 Healthcare GraphRAG là một hệ thống chatbot thông minh kết hợp cơ sở dữ liệu đồ thị Neo4j với các mô hình ngôn ngữ lớn (LLM) từ Azure OpenAI để trả lời các câu hỏi y tế chính xác và có ngữ cảnh. Dự án sử dụng kỹ thuật Retrieval-Augmented Generation (RAG) dựa trên đồ thị tri thức.
 
+Tài liệu ôn kiến trúc và phỏng vấn: [Hành trình thiết kế Healthcare Agentic GraphRAG](docs/healthcare-agentic-graphrag-review.md).
+
 ## 📋 Mục lục
 
 - [Tính năng nổi bật](#-tính-năng-nổi-bật)
@@ -22,7 +24,7 @@ Healthcare GraphRAG là một hệ thống chatbot thông minh kết hợp cơ s
 ## ✨ Tính năng nổi bật
 
 - **Truy vấn thông minh**: Tự động chuyển đổi câu hỏi ngôn ngữ tự nhiên thành truy vấn Cypher chính xác
-- **Cơ chế ReAct Agent**: Định tuyến giữa GraphRAG bệnh án, curated guideline corpus và workflow đối chiếu thuốc đa nguồn có giới hạn
+- **Cơ chế ReAct Agent**: Bounded orchestration giữa GraphRAG bệnh án, curated guideline corpus và workflow đa nguồn theo policy
 - **Đa ngữ**: Hỗ trợ tiếng Việt và tiếng Anh
 - **Lưu trữ hội thoại**: Lưu và quản lý các cuộc hội thoại trong cơ sở dữ liệu Neo4j
 - **Đa nền tảng**: Giao diện web (Streamlit), API (FastAPI) và CLI
