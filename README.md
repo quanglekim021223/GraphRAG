@@ -180,7 +180,8 @@ LOG_LEVEL=INFO
 GITHUB_TOKEN=your_github_token_here
 TAVILY_API_KEY=your_tavily_api_key_here
 CURATED_AUTO_INGEST_ENABLED=true
-CURATED_AUTO_INGEST_MAX_DOCUMENTS=2
+CURATED_DISCOVERY_MAX_RESULTS=5
+CURATED_AUTO_INGEST_MAX_DOCUMENTS=3
 ```
 
 ## 🐳 Hướng dẫn Docker
@@ -286,11 +287,12 @@ medical_guideline_tool
 → reject patient-identifying input
 → embed the current de-identified question
 → search approved/trusted-official active sections
-→ on miss: Tavily finds allowlisted candidate URLs
+→ on miss: Tavily finds and ranks up to 5 allowlisted candidate URLs
+→ validate candidates and ingest at most 3 full documents
 → controlled full-document download (never store the snippet)
 → validate final URL + publication date + content type + hash
 → extract, section-chunk, embed and auto-activate as trusted_official
-→ retry local section retrieval
+→ retry local retrieval and return the top 3 relevant sections
 → return extractive section text with [G1], [G2] citations
 ```
 

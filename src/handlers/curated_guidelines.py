@@ -762,7 +762,8 @@ def auto_ingest_trusted_guidelines(
     store: CuratedGuidelineStore,
     embedder: Any,
     tavily_api_key: str,
-    max_documents: int = 2,
+    discovery_max_results: int = 5,
+    max_documents: int = 3,
     search_options: Optional[Dict[str, Any]] = None,
     searcher: Callable[..., Dict[str, Any]] = search_medical_guidelines,
     downloader: Callable[[str], DownloadedDocument] = download_approved_document,
@@ -778,9 +779,12 @@ def auto_ingest_trusted_guidelines(
     if contains_sensitive_patient_data(question):
         return {"status": "privacy_denied", "ingested": [], "skipped": 0}
 
-    safe_max_documents = max(1, min(int(max_documents), 3))
+    safe_discovery_max = max(1, min(int(discovery_max_results), 5))
+    safe_max_documents = min(
+        max(1, min(int(max_documents), 3)), safe_discovery_max
+    )
     options = dict(search_options or {})
-    options["max_results"] = safe_max_documents
+    options["max_results"] = safe_discovery_max
     discovery = searcher(
         question=question,
         api_key=tavily_api_key,
@@ -796,7 +800,15 @@ def auto_ingest_trusted_guidelines(
     today = on_date or date.today()
     ingested: List[Dict[str, Any]] = []
     skipped = 0
-    for candidate in discovery.get("evidence", [])[:safe_max_documents]:
+    discovered = discovery.get("evidence", [])
+    if not isinstance(discovered, list):
+        discovered = []
+    candidates = sorted(
+        discovered[:safe_discovery_max], key=_trusted_candidate_rank
+    )
+    for candidate in candidates:
+        if len(ingested) >= safe_max_documents:
+            break
         if not isinstance(candidate, dict):
             skipped += 1
             continue
@@ -858,10 +870,16 @@ def auto_ingest_trusted_guidelines(
     audit_event(
         "trusted_guideline_auto_ingest_completed",
         status=status,
+        discovered_count=len(candidates),
         ingested_count=len(ingested),
         skipped_count=skipped,
     )
-    return {"status": status, "ingested": ingested, "skipped": skipped}
+    return {
+        "status": status,
+        "discovered": len(candidates),
+        "ingested": ingested,
+        "skipped": skipped,
+    }
 
 
 def retrieve_curated_guidelines(
@@ -888,10 +906,11 @@ def retrieve_curated_guidelines(
             audit_event("curated_guideline_corpus_empty")
             return {"status": "corpus_empty", "response": CURATED_CORPUS_EMPTY}
         query_vector = active_embedder.embed([question.strip()])[0]
+        safe_top_k = max(1, min(int(top_k), 3))
         matches = active_store.search(
             query_vector=query_vector,
             embedding_model=model,
-            top_k=top_k,
+            top_k=safe_top_k,
             min_score=min_score,
             on_date=on_date,
         )
@@ -960,7 +979,8 @@ def retrieve_guidelines_with_auto_ingest(
     top_k: int = 3,
     min_score: float = 0.45,
     auto_ingest_enabled: bool = True,
-    auto_ingest_max_documents: int = 2,
+    discovery_max_results: int = 5,
+    auto_ingest_max_documents: int = 3,
     search_options: Optional[Dict[str, Any]] = None,
     embedder: Optional[Any] = None,
     on_date: Optional[date] = None,
@@ -1003,6 +1023,7 @@ def retrieve_guidelines_with_auto_ingest(
         store=active_store,
         embedder=active_embedder,
         tavily_api_key=tavily_api_key,
+        discovery_max_results=discovery_max_results,
         max_documents=auto_ingest_max_documents,
         search_options=search_options,
         searcher=searcher,
@@ -1224,6 +1245,22 @@ def _strict_publication_date(value: Any, today: date) -> Optional[str]:
         except ValueError:
             return None
     return parsed.isoformat() if parsed <= today else None
+
+
+def _trusted_candidate_rank(candidate: Any) -> Tuple[int, float, str]:
+    """Rank discovery candidates deterministically before full-document ingest."""
+    if not isinstance(candidate, dict):
+        return (999, 0.0, "")
+    try:
+        priority = int(candidate.get("source_priority", 999))
+    except (TypeError, ValueError):
+        priority = 999
+    try:
+        score = float(candidate.get("score", 0))
+    except (TypeError, ValueError):
+        score = 0.0
+    url = str(candidate.get("final_url") or candidate.get("url") or "")
+    return (priority, -score, url)
 
 
 def _parse_iso_date(value: str, field: str) -> date:

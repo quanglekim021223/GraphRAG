@@ -72,6 +72,7 @@ def _guideline_options(config: Config, actor_id: str) -> Dict[str, Any]:
         "top_k": config.curated_retrieval_top_k,
         "min_score": config.curated_retrieval_min_score,
         "auto_ingest_enabled": config.curated_auto_ingest_enabled,
+        "discovery_max_results": config.curated_discovery_max_results,
         "auto_ingest_max_documents": config.curated_auto_ingest_max_documents,
         "search_options": {
             "min_score": config.medical_search_min_score,

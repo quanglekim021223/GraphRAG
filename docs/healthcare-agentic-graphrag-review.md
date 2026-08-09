@@ -472,16 +472,17 @@ làm evidence và không bắt con người duyệt mọi URL?
 
 ```text
 local approved/trusted retrieval
-→ nếu miss: Tavily tìm candidate trong exact whitelist
-→ yêu cầu publication date rõ ràng
-→ controlled full-document download
+→ nếu miss: Tavily tìm tối đa 5 candidate trong exact whitelist
+→ validate URL/redirect/publication date + rank theo source priority và score
+→ controlled full-document download theo thứ tự xếp hạng
+→ auto-ingest tối đa 3 documents hợp lệ
 → SHA-256 snapshot version + deduplication
 → full-text extraction
 → chunk trong section/page boundary
 → embedding
 → PostgreSQL guideline_documents + guideline_sections
 → auto-activate với review_status=trusted_official
-→ retry section-level retrieval + [G*]
+→ retry retrieval top-k 3 sections + [G*]
 ```
 
 ### Invariants quan trọng
@@ -628,8 +629,9 @@ ReAct chọn medical_guideline_tool
 → sensitive-data gate
 → embed query
 → retrieve approved/trusted-official + active + effective sections
-→ miss thì strict Tavily URL discovery + full-document auto-ingestion
-→ retry local retrieval
+→ miss thì Tavily lấy 5 URL trong whitelist, validate + rank
+→ auto-ingest tối đa 3 full documents
+→ retry local retrieval top-k 3 sections
 → extractive response + [G*]
 → return_direct
 → user

@@ -83,8 +83,11 @@ class Config:
     curated_auto_ingest_enabled: bool = os.getenv(
         "CURATED_AUTO_INGEST_ENABLED", "true"
     ).strip().lower() in {"1", "true", "yes", "on"}
+    curated_discovery_max_results: int = int(
+        os.getenv("CURATED_DISCOVERY_MAX_RESULTS", "5")
+    )
     curated_auto_ingest_max_documents: int = int(
-        os.getenv("CURATED_AUTO_INGEST_MAX_DOCUMENTS", "2")
+        os.getenv("CURATED_AUTO_INGEST_MAX_DOCUMENTS", "3")
     )
 
     _instance = None
@@ -168,8 +171,11 @@ class Config:
             self.curated_auto_ingest_enabled = os.getenv(
                 "CURATED_AUTO_INGEST_ENABLED", "true"
             ).strip().lower() in {"1", "true", "yes", "on"}
+            self.curated_discovery_max_results = int(
+                os.getenv("CURATED_DISCOVERY_MAX_RESULTS", "5")
+            )
             self.curated_auto_ingest_max_documents = int(
-                os.getenv("CURATED_AUTO_INGEST_MAX_DOCUMENTS", "2")
+                os.getenv("CURATED_AUTO_INGEST_MAX_DOCUMENTS", "3")
             )
             self._initialized = True
 
@@ -206,9 +212,25 @@ class Config:
             )
         if self.memory_raw_retention_days < 1:
             raise ValueError("MEMORY_RAW_RETENTION_DAYS must be at least 1")
+        if not 1 <= self.curated_retrieval_top_k <= 3:
+            raise ValueError(
+                "CURATED_RETRIEVAL_TOP_K must be between 1 and 3"
+            )
+        if not 1 <= self.curated_discovery_max_results <= 5:
+            raise ValueError(
+                "CURATED_DISCOVERY_MAX_RESULTS must be between 1 and 5"
+            )
         if not 1 <= self.curated_auto_ingest_max_documents <= 3:
             raise ValueError(
                 "CURATED_AUTO_INGEST_MAX_DOCUMENTS must be between 1 and 3"
+            )
+        if (
+            self.curated_auto_ingest_max_documents
+            > self.curated_discovery_max_results
+        ):
+            raise ValueError(
+                "CURATED_AUTO_INGEST_MAX_DOCUMENTS cannot exceed "
+                "CURATED_DISCOVERY_MAX_RESULTS"
             )
 
 

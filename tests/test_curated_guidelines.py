@@ -26,6 +26,12 @@ from src.handlers.medical_guideline_search import SENSITIVE_SEARCH_REFUSAL
 
 
 SOURCE_URL = "https://www.who.int/news-room/fact-sheets/detail/hypertension"
+WHO_DIABETES_URL = "https://www.who.int/news-room/fact-sheets/detail/diabetes"
+WHO_OBESITY_URL = (
+    "https://www.who.int/news-room/fact-sheets/detail/obesity-and-overweight"
+)
+NICE_URL = "https://www.nice.org.uk/guidance/ng136"
+CDC_URL = "https://www.cdc.gov/flu/hcp/clinical-guidance/index.html"
 
 
 class _FakeResponse:
@@ -360,19 +366,60 @@ class CuratedGuidelineTests(unittest.TestCase):
             search_calls.append(kwargs)
             return {
                 "status": "success",
-                "evidence": [{
-                    "title": "WHO hypertension guidance",
-                    "final_url": SOURCE_URL,
-                    "source_name": "WHO",
-                    "publication_date": "2026-01-01",
-                }],
+                "evidence": [
+                    {
+                        "title": "CDC influenza guidance",
+                        "final_url": CDC_URL,
+                        "source_name": "CDC",
+                        "publication_date": "2026-01-01",
+                        "source_priority": 40,
+                        "score": 0.99,
+                    },
+                    {
+                        "title": "WHO obesity guidance",
+                        "final_url": WHO_OBESITY_URL,
+                        "source_name": "WHO",
+                        "publication_date": "2026-01-01",
+                        "source_priority": 20,
+                        "score": 0.80,
+                    },
+                    {
+                        "title": "WHO hypertension without a date",
+                        "final_url": SOURCE_URL,
+                        "source_name": "WHO",
+                        "publication_date": None,
+                        "source_priority": 20,
+                        "score": 0.99,
+                    },
+                    {
+                        "title": "NICE hypertension guidance",
+                        "final_url": NICE_URL,
+                        "source_name": "NICE",
+                        "publication_date": "2026-01-01",
+                        "source_priority": 30,
+                        "score": 0.90,
+                    },
+                    {
+                        "title": "WHO diabetes guidance",
+                        "final_url": WHO_DIABETES_URL,
+                        "source_name": "WHO",
+                        "publication_date": "2026-01-01",
+                        "source_priority": 20,
+                        "score": 0.95,
+                    },
+                ],
             }
 
         def downloader(url):
             download_calls.append(url)
-            return _downloaded(
-                b"<h1>Hypertension treatment</h1>"
-                b"<p>Assess cardiovascular risk before treatment.</p>"
+            return DownloadedDocument(
+                source_url=url,
+                final_url=url,
+                content_type="text/html",
+                content=(
+                    "<h1>Hypertension treatment</h1>"
+                    f"<p>Official document: {url}</p>"
+                ).encode("utf-8"),
             )
 
         result = retrieve_guidelines_with_auto_ingest(
@@ -382,7 +429,7 @@ class CuratedGuidelineTests(unittest.TestCase):
             api_key="unused",
             embedding_model=self.embedder.model,
             tavily_api_key="tavily-key",
-            top_k=1,
+            top_k=3,
             min_score=0.8,
             embedder=self.embedder,
             on_date=date(2026, 1, 10),
@@ -392,16 +439,25 @@ class CuratedGuidelineTests(unittest.TestCase):
         )
 
         self.assertEqual("success", result["status"])
-        self.assertEqual(1, len(result["auto_ingest"]["ingested"]))
-        self.assertEqual(TRUSTED_OFFICIAL_STATUS,
-                         result["evidence"][0]["review_status"])
+        self.assertEqual(5, search_calls[0]["max_results"])
+        self.assertEqual(5, result["auto_ingest"]["discovered"])
+        self.assertEqual(3, len(result["auto_ingest"]["ingested"]))
+        self.assertEqual(1, result["auto_ingest"]["skipped"])
+        self.assertEqual(3, len(result["evidence"]))
+        self.assertTrue(all(
+            item["review_status"] == TRUSTED_OFFICIAL_STATUS
+            for item in result["evidence"]
+        ))
         self.assertIn("Nguồn chính thức tự động xác minh", result["response"])
         self.assertEqual(1, len(search_calls))
-        self.assertEqual([SOURCE_URL], download_calls)
         self.assertEqual(
-            TRUSTED_OFFICIAL_STATUS,
-            self.store.list_documents()[0]["review_status"],
+            [WHO_DIABETES_URL, WHO_OBESITY_URL, NICE_URL], download_calls
         )
+        self.assertEqual(3, len(self.store.list_documents()))
+        self.assertTrue(all(
+            item["review_status"] == TRUSTED_OFFICIAL_STATUS
+            for item in self.store.list_documents()
+        ))
 
     def test_auto_ingest_rejects_candidate_without_publication_date(self):
         self._require_store()
