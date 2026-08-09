@@ -11,20 +11,13 @@ import asyncio
 
 import nest_asyncio
 import streamlit as st
-from langchain_core.messages import HumanMessage, SystemMessage
 
 from src.helpers.agent_initializer import agent_initializer
 from src.helpers.logging_config import logger
-from src.helpers.prompts import get_healthcare_system_prompt
-from src.handlers.grounding_verifier import select_controlled_agent_response
-from src.helpers.security_context import doctor_security_context
-from src.helpers.tools import set_last_query
 from src.handlers.security_guardrails import check_prompt_injection
 from src.handlers.conversation_handler import (
-    store_conversation,
     get_conversation_history,
     get_all_conversations,
-    delete_conversation
 )
 
 
@@ -104,12 +97,11 @@ def render_conversation_selector():
     return False
 
 
-def process_user_input(agent_executor, user_input):
+def process_user_input(user_input):
     """
     Process user input and generate response using the agent.
 
     Args:
-        agent_executor: The LangGraph agent instance
         user_input: User's question string
     """
     if not user_input:
@@ -137,40 +129,28 @@ def process_user_input(agent_executor, user_input):
             st.error("Vui lòng xác thực Doctor ID trước khi truy cập dữ liệu.")
             return
         with st.spinner('Đang xử lý câu hỏi của bạn...'):
-            # Lấy context đầy đủ từ lịch sử hội thoại
-            conversation_context = agent_initializer.get_conversation_context(
-                st.session_state.current_thread_id, doctor_id
+            result = agent_initializer.run_turn(
+                st.session_state.current_thread_id,
+                doctor_id,
+                user_input,
             )
-
-            # Sử dụng prompt chung
-            system_content = get_healthcare_system_prompt(conversation_context)
-            system_message = SystemMessage(content=system_content)
-
-            config = {"configurable": {
-                "thread_id": (
-                    f"{doctor_id}:{st.session_state.current_thread_id}"
-                )}}
-            with doctor_security_context(doctor_id, user_input):
-                set_last_query(None)
-                full_response = agent_executor.invoke(
-                    {"messages": [system_message,
-                                  HumanMessage(content=user_input)]},
-                    config
-                )
-            response = select_controlled_agent_response(full_response)
+            response = result.response
 
         st.session_state.messages.append(
             {"role": "assistant", "content": response})
         with st.chat_message("assistant"):
             st.write(response)
-
-        # Save to Neo4j
-        store_conversation(
-            st.session_state.current_thread_id,
-            doctor_id,
-            user_input,
-            response,
-        )
+        if not result.memory_saved:
+            st.warning(
+                "Câu trả lời đã hoàn tất nhưng chưa lưu được memory; "
+                "lượt sau có thể thiếu ngữ cảnh."
+            )
+        else:
+            # This runs after the response is rendered and only calls the LLM
+            # when the configured compaction threshold has been crossed.
+            agent_initializer.compact_conversation(
+                st.session_state.current_thread_id, doctor_id
+            )
     except Exception as e:  # pylint: disable=broad-exception-caught
         # Exceptions need to be caught broadly as this is a top-level UI handler
         logger.error("Error processing question: %s", str(e), exc_info=True)
@@ -191,6 +171,14 @@ def render_memory_tab():
         st.markdown("### Lịch sử hội thoại")
         st.text_area("Nội dung hội thoại", value=context.get("conversation", ""),
                      height=300, disabled=True)
+
+        st.markdown("### Rolling summary")
+        st.text_area(
+            "Tóm tắt điều hướng (không phải bằng chứng y tế)",
+            value=context.get("summary", ""),
+            height=160,
+            disabled=True,
+        )
 
         st.markdown("### Chủ đề chính")
         if "topics" in context and context["topics"]:
@@ -285,7 +273,7 @@ def main():
 
     try:
         required_vars = ["NEO4J_URI", "NEO4J_USERNAME",
-                         "NEO4J_PASSWORD", "GITHUB_TOKEN"]
+                         "NEO4J_PASSWORD", "POSTGRES_URI", "GITHUB_TOKEN"]
         missing_vars = [var for var in required_vars if not os.getenv(var)]
         if missing_vars:
             st.error(
@@ -293,7 +281,7 @@ def main():
             return
 
         # Initialize agent
-        agent_executor = agent_initializer.get_agent()
+        agent_initializer.get_agent()
 
         # Initialize session state
         if "doctor_id" not in st.session_state:
@@ -331,12 +319,12 @@ def main():
 
             # Chat input
             user_input = st.chat_input("Nhập câu hỏi của bạn...")
-            process_user_input(agent_executor, user_input)
+            process_user_input(user_input)
 
             # Delete conversation button
             if st.button("Xóa lịch sử cuộc hội thoại hiện tại"):
                 try:
-                    if delete_conversation(
+                    if agent_initializer.delete_thread_memory(
                         st.session_state.current_thread_id, doctor_id
                     ):
                         # Nếu xóa thành công, cập nhật UI

@@ -4,7 +4,8 @@
 
 ![Healthcare GraphRAG](https://img.shields.io/badge/Healthcare-GraphRAG-blue)
 ![Python](https://img.shields.io/badge/Python-3.9+-green)
-![Neo4j](https://img.shields.io/badge/Database-Neo4j-brightgreen)
+![Neo4j](https://img.shields.io/badge/Patient_Data-Neo4j-brightgreen)
+![PostgreSQL](https://img.shields.io/badge/Memory-PostgreSQL-blue)
 ![Azure OpenAI](https://img.shields.io/badge/AI-Azure_OpenAI-orange)
 ![LangChain](https://img.shields.io/badge/Framework-LangChain-yellow)
 ![LangGraph](https://img.shields.io/badge/Framework-LangGraph-purple)
@@ -26,7 +27,7 @@ Tài liệu ôn kiến trúc và phỏng vấn: [Hành trình thiết kế Healt
 - **Truy vấn thông minh**: Tự động chuyển đổi câu hỏi ngôn ngữ tự nhiên thành truy vấn Cypher chính xác
 - **Cơ chế ReAct Agent**: Bounded orchestration giữa GraphRAG bệnh án, curated guideline corpus và workflow đa nguồn theo policy
 - **Đa ngữ**: Hỗ trợ tiếng Việt và tiếng Anh
-- **Lưu trữ hội thoại**: Lưu và quản lý các cuộc hội thoại trong cơ sở dữ liệu Neo4j
+- **Lưu trữ hội thoại**: PostgreSQL lưu checkpoint, raw turns và rolling summary theo doctor/thread; Neo4j chỉ giữ patient graph
 - **Đa nền tảng**: Giao diện web (Streamlit), API (FastAPI) và CLI
 - **Hệ thống bộ nhớ**: Duy trì ngữ cảnh và lịch sử hội thoại
 - **Giải thích lý luận**: Hiển thị quá trình suy luận thông qua các truy vấn Cypher
@@ -37,11 +38,11 @@ Tài liệu ôn kiến trúc và phỏng vấn: [Hành trình thiết kế Healt
 
 ```plaintext
 healthcare-graphrag/
-├── .env                       # Biến môi trường (Neo4j, API keys)
+├── .env                       # Biến môi trường (Neo4j, PostgreSQL, API keys)
 ├── .env.example               # Mẫu biến môi trường
 ├── .gitignore                 # Cấu hình Git ignore
 ├── schema.cypher              # Define Schema
-├── docker-compose.yml         # Cấu hình Docker Compose (Neo4j, API, UI, CLI)
+├── docker-compose.yml         # Neo4j, PostgreSQL, API, UI, CLI
 ├── docker-entrypoint.sh       # Script khởi động cho containers
 ├── Dockerfile                 # Cấu hình build image Docker
 ├── main.py                    # Điểm khởi chạy chính của ứng dụng
@@ -104,7 +105,8 @@ Healthcare GraphRAG là một ứng dụng theo mô hình kiến trúc phân l�
      chỉ chuyển medication names đã khử định danh sang curated corpus)
 
 4. **Lớp dữ liệu**:
-   - Neo4j Graph Database (dữ liệu y tế và lịch sử hội thoại)
+   - Neo4j Graph Database (nguồn dữ liệu bệnh nhân và quan hệ y tế)
+   - PostgreSQL (LangGraph checkpoint, hội thoại và rolling summary)
    - Azure OpenAI (Mô hình ngôn ngữ)
 
 ## 📋 Điều kiện tiên quyết
@@ -118,6 +120,7 @@ Healthcare GraphRAG là một ứng dụng theo mô hình kiến trúc phân l�
 ### Cấu hình môi trường
 Sao chép file `.env.example` thành `.env` và điền các giá trị:
 - `NEO4J_PASSWORD`: Đặt mật khẩu bất kỳ cho Neo4j (ví dụ: `password123`).
+- `POSTGRES_URI`: DSN PostgreSQL dùng cho checkpoint và conversation memory.
 - `LANGCHAIN_API_KEY`: Lấy từ [LangSmith](https://smith.langchain.com/) sau khi đăng ký.
 - `GITHUB_TOKEN`: Tạo từ [GitHub Settings](https://github.com/settings/tokens) nếu cần.
 - `TAVILY_API_KEY`: Bật tìm kiếm guideline y khoa. Nếu thiếu key, tool sẽ
@@ -159,6 +162,12 @@ Tạo file `.env` với nội dung sau:
 NEO4J_URI=bolt://localhost:7689
 NEO4J_USERNAME=neo4j
 NEO4J_PASSWORD=your_password_here
+POSTGRES_URI=postgresql://healthcare:healthcare@localhost:5432/healthcare
+MEMORY_RECENT_TURNS=6
+MEMORY_SUMMARY_TRIGGER_TURNS=12
+MEMORY_SUMMARY_MAX_CHARS=4000
+MEMORY_CONTEXT_MAX_CHARS=16000
+MEMORY_RAW_RETENTION_DAYS=90
 
 # LangSmith tracing
 LANGCHAIN_TRACING_V2=true
@@ -190,7 +199,7 @@ Khởi động Neo4j và các service khác
 ```bash
 docker-compose up -d
 ```
-Đợi khoảng 60 giây để Neo4j khởi động hoàn tất
+Đợi healthcheck của Neo4j và PostgreSQL hoàn tất
 
 ### Kiểm tra hoạt động
 Kiểm tra các container đang chạy
@@ -214,6 +223,31 @@ docker-compose exec neo4j cypher-shell -u $NEO4J_USERNAME -p $NEO4J_PASSWORD "MA
 - **Streamlit**: Giao diện web tương tác để trò chuyện với chatbot.
 - **FastAPI**: API RESTful để tích hợp chatbot vào ứng dụng khác.
 - **CLI**: Giao diện dòng lệnh để sử dụng nhanh qua terminal.
+
+### Conversation memory
+
+Ba interface dùng chung một đường thực thi và một PostgreSQL store:
+
+```text
+request (doctor_id + thread_id)
+→ rolling summary + pending/recent turns
+→ ReAct với bounded context
+→ controlled grounded response
+→ persist raw turn
+→ completed LangGraph checkpoint cleanup
+→ compact older turns khi vượt threshold
+```
+
+`conversation_threads` và `conversation_messages` luôn scope bằng khóa kép
+`(doctor_id, thread_id)`. Model chỉ nhận summary và một cửa sổ gần đây có hard
+character limit; summary chỉ là navigation context, không phải nguồn bằng chứng.
+Raw turn chỉ được purge sau khi đã được summary bao phủ và đã quá
+`MEMORY_RAW_RETENTION_DAYS`; giá trị này phải theo policy pháp lý/audit của nơi
+triển khai. Mọi patient fact trong câu trả lời vẫn phải được truy xuất lại từ
+Neo4j trong doctor scope. `PostgresSaver` giữ state bền vững trong lúc graph đang
+chạy; toàn bộ checkpoint của thread được xóa sau khi kết quả đã được kiểm soát và
+raw turn đã được lưu (hoặc lỗi lưu đã được ghi log), nên nó không trở thành bản
+sao lịch sử hội thoại thứ hai.
 
 ### Doctor scope authorization
 

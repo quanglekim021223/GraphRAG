@@ -4,20 +4,16 @@ API Router module for Healthcare GraphRAG system.
 This module provides FastAPI endpoints for interacting with the Healthcare GraphRAG system,
 including chat functionality and persistent conversation history across sessions.
 """
+import asyncio
 import uuid
 from typing import Optional
 
 import uvicorn
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import BackgroundTasks, FastAPI, Header, HTTPException
 from pydantic import BaseModel
-from langchain_core.messages import SystemMessage, HumanMessage
 from src.helpers.agent_initializer import agent_initializer
 from src.config.settings import Config
 from src.helpers.logging_config import logger
-from src.helpers.tools import get_last_query, set_last_query
-from src.helpers.prompts import get_healthcare_system_prompt
-from src.handlers.grounding_verifier import select_controlled_agent_response
-from src.helpers.security_context import doctor_security_context
 from src.handlers.security_guardrails import check_prompt_injection
 
 
@@ -41,7 +37,7 @@ def create_app():
     config.validate()
 
     # Khởi tạo ReAct agent
-    agent_executor = agent_initializer.get_agent()
+    agent_initializer.get_agent()
 
     @app.get("/")
     def home():
@@ -50,6 +46,7 @@ def create_app():
     @app.post("/chat")
     async def chat(
         request_body: ChatRequest,
+        background_tasks: BackgroundTasks,
         doctor_id: str = Header(..., alias="X-Doctor-ID"),
     ):
         question = request_body.question
@@ -69,35 +66,27 @@ def create_app():
             }
 
         try:
-            # Sử dụng prompt chung từ helpers/prompts.py
-            system_content = get_healthcare_system_prompt()
-            system_message = SystemMessage(content=system_content)
-
-            # Truyền thread_id vào config
-            config_obj = {"configurable": {
-                "thread_id": f"{doctor_id}:{thread_id}"
-            }}
-
-            # Gọi agent
-            # X-Doctor-ID must be injected from verified auth claims/gateway in production.
-            with doctor_security_context(doctor_id, question):
-                set_last_query(None)
-                full_response = await agent_executor.ainvoke(
-                    {"messages": [system_message, HumanMessage(content=question)]},
-                    config_obj
+            # The sync saver is called in a worker so the event loop remains
+            # responsive and request-local ContextVars stay inside one thread.
+            result = await asyncio.to_thread(
+                agent_initializer.run_turn,
+                thread_id,
+                doctor_id,
+                question,
+            )
+            if result.memory_saved:
+                background_tasks.add_task(
+                    agent_initializer.compact_conversation,
+                    thread_id,
+                    doctor_id,
                 )
-
-            # Bypass any ReAct paraphrase when grounded database data was used.
-            agent_response = select_controlled_agent_response(full_response)
-
-            # Trích xuất Cypher query từ rag_tool nếu có
-            query_info = get_last_query()
 
             return {
                 "question": question,
-                "response": agent_response,
-                "query": query_info,
-                "thread_id": thread_id
+                "response": result.response,
+                "query": result.query,
+                "thread_id": thread_id,
+                "memory_persisted": result.memory_saved,
             }
 
         except Exception as e:

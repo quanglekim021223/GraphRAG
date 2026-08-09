@@ -381,9 +381,16 @@ ReAct không được truyền hoặc sửa hai giá trị này qua tool argumen
 
 #### 5. Conversation/checkpoint isolation
 
-- Neo4j conversation records có cả `thread_id` và `doctor_id`.
-- Memory key là `doctor_id:thread_id`.
-- LangGraph checkpoint thread ID cũng được prefix bằng doctor ID.
+- Neo4j chỉ giữ patient clinical graph, không còn lưu chat history.
+- PostgreSQL lưu raw turns và rolling summary bằng khóa kép
+  `(doctor_id, thread_id)`.
+- LangGraph dùng `PostgresSaver`; checkpoint thread ID được prefix bằng doctor
+  ID. Checkpoint tồn tại trong lúc graph chạy để hỗ trợ recovery và được xóa khi
+  controlled response đã hoàn tất, tránh lưu trùng conversation history.
+- Prompt chỉ nhận summary + pending/recent turns có giới hạn; raw history vẫn giữ
+  cho UI/audit nhưng không được nạp toàn bộ vào model.
+- Summary là context điều hướng không đáng tin cậy, không phải authorization hay
+  medical evidence. Patient fact phải được truy xuất lại từ Neo4j.
 
 #### 6. Một outer data tool mỗi request
 
@@ -726,6 +733,7 @@ enforcement riêng.
 | Curated approved/effective section retrieval `[G*]` | Có trong code và unit tests |
 | Tavily chỉ dùng cho admin discovery | Có trong reachable code path |
 | Policy-driven patient + guideline workflow | Có cho 3 intents |
+| PostgreSQL doctor-scoped memory + rolling summary | Có trong code, unit test và local integration smoke |
 | Test-result clinical interpretation | Chưa hỗ trợ do data contract thiếu |
 | Identity provider/JWT thật | Chưa có |
 | Distributed cache/rate limit | Chưa có |
@@ -733,7 +741,7 @@ enforcement riêng.
 | Accuracy tăng 65% → 90% | Chưa có evaluation evidence |
 | Production clinical validation | Chưa có |
 
-Snapshot kiểm thử tại thời điểm cập nhật tài liệu: 100 unit tests pass với fake
+Snapshot kiểm thử tại thời điểm cập nhật tài liệu: 107 unit tests pass với fake
 GraphRAG/retriever và các isolated components. Đây không thay thế live integration
 test hoặc clinical evaluation.
 
