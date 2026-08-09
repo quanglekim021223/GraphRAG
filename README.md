@@ -178,6 +178,9 @@ LANGCHAIN_API_KEY=your_langsmith_api_key_here
 LOG_LEVEL=INFO
 # GitHub token
 GITHUB_TOKEN=your_github_token_here
+TAVILY_API_KEY=your_tavily_api_key_here
+CURATED_AUTO_INGEST_ENABLED=true
+CURATED_AUTO_INGEST_MAX_DOCUMENTS=2
 ```
 
 ## 🐳 Hướng dẫn Docker
@@ -272,23 +275,28 @@ The immutable current-turn question is bound to the same request-local security
 context, so tools do not trust an LLM-supplied copy that could change a patient
 reference before authorization or retrieval.
 
-### Curated medical guideline corpus
+### Trusted medical guideline corpus
 
-General medical questions are answered only from a local corpus of explicitly
-reviewed, currently effective documents. The runtime path is:
+General medical questions prefer the local PostgreSQL corpus. On a miss, the
+runtime may automatically index a full document only when Tavily returns an
+exact allowlisted official URL with an explicit publication date:
 
 ```text
 medical_guideline_tool
 → reject patient-identifying input
 → embed the current de-identified question
-→ search approved + active document sections
+→ search approved/trusted-official active sections
+→ on miss: Tavily finds allowlisted candidate URLs
+→ controlled full-document download (never store the snippet)
+→ validate final URL + publication date + content type + hash
+→ extract, section-chunk, embed and auto-activate as trusted_official
+→ retry local section retrieval
 → return extractive section text with [G1], [G2] citations
 ```
 
-Tavily is no longer part of this answer path. It is available only to the admin
-`discover` command for finding candidate documents. Provider-side answer
-generation and raw-content retrieval remain disabled during discovery. Candidate
-URLs are accepted only when HTTPS host and path match the local allowlist in
+Tavily is a conditional discovery fallback, not the answer generator. Provider-
+side answer generation and raw-content retrieval remain disabled. Candidate URLs
+are accepted only when HTTPS host and path match the local allowlist in
 `src/handlers/medical_guideline_search.py`:
 
 - WHO guidelines, publications and fact sheets
@@ -296,10 +304,11 @@ URLs are accepted only when HTTPS host and path match the local allowlist in
 - CDC healthcare-professional clinical guidance
 - Explicit Ministry of Health document attachment paths
 
-Discovery snippets are never inserted or approved automatically. Patient
-identifiers are rejected before any external call, and one chat request may
-invoke only one outer data-bearing tool. The bounded composite tool below is the
-only exception that can consult both stores internally.
+Discovery snippets are never inserted into the corpus. The backend downloads
+the validated full PDF/HTML/plain-text document and creates a content-hash
+snapshot version. Missing/future publication dates fail closed. Patient
+identifiers are rejected before any external call, and the search never expands
+outside the whitelist when no candidate is found.
 
 Before a citation is accepted, the backend performs a bounded `HEAD` check with
 automatic redirects disabled. Every redirect hop and the final URL must remain
@@ -322,10 +331,11 @@ content hash, score and deterministic source priority. These controls are
 in-memory per process; multi-worker production deployments must move shared
 cache/rate/budget/circuit state to Redis or an equivalent central store.
 
-Curated ingestion is managed with:
+Manual ingestion remains available when organizational policy requires internal
+approval for an otherwise allowlisted official document:
 
 ```bash
-# 1. Find candidates only; nothing is approved automatically.
+# 1. Optional admin discovery.
 python3 -m scripts.curated_guidelines discover "WHO hypertension guideline"
 
 # 2. Controlled download and immutable hash; status remains pending_review.
@@ -359,16 +369,16 @@ PostgreSQL instance configured by `POSTGRES_URI`, using the independent
 idempotent. Embeddings currently use PostgreSQL arrays and deterministic cosine
 ranking in Python, so no pgvector extension is required for the bounded corpus.
 
-At query time only documents with `review_status=approved`,
-`effective_status=active`, a matching embedding model and a valid effective date
-are eligible. Responses contain verbatim section text, title, heading, source
-URL, publication date and version; the outer ReAct model cannot rewrite them.
-Different sources remain separate and the system does not resolve clinical
-disagreement automatically.
+At query time only documents with `review_status` equal to `approved` or
+`trusted_official`, plus `effective_status=active`, a matching
+embedding model and a valid effective date are eligible. Responses contain a
+trust label, verbatim section text, title, heading, source URL, publication date
+and hash-derived version; the outer ReAct model cannot rewrite them. Different
+sources remain separate and the system does not resolve clinical disagreement.
 
 ### Policy-driven patient-guideline workflow
 
-Questions that require both one authorized patient record and reviewed medical
+Questions that require both one authorized patient record and trusted medical
 guidance use one controlled composite path:
 
 ```text
@@ -376,7 +386,7 @@ patient_guideline_tool
 → select an allowlisted clinical intent
 → GraphRAG lookup for the minimum required facts inside doctor scope
 → policy-filter fields and remove patient identity/history
-→ retrieve reviewed, effective guideline sections
+→ retrieve internal-approved or trusted-official sections
 → return patient evidence [E*] and guideline evidence [G*] separately
 → END (return_direct; no outer-agent paraphrase)
 ```
@@ -396,7 +406,9 @@ prescribe, or resolve disagreement between sources.
 
 The Python cosine scan is intentionally sized for a small curated corpus. A
 large corpus should keep the PostgreSQL metadata contract and move ranking to a
-pgvector index or another reviewed vector service.
+pgvector index or another controlled vector service. A first-time corpus miss
+may be slower because strict discovery, full download and embedding happen in
+that request; later requests reuse the persisted document.
 
 PostgreSQL integration tests use an isolated temporary schema and require an
 explicit test DSN:

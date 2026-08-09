@@ -3,7 +3,7 @@
 Neo4j remains the source of truth for patient records. PostgreSQL stores the
 application's operational state: LangGraph checkpoints, raw conversation turns
 and a rolling summary. The summary is navigation context only; medical claims
-must always be retrieved again from Neo4j or the approved guideline corpus.
+must always be retrieved again from Neo4j or the trusted guideline corpus.
 
 The checkpointer is operational, not conversational: checkpoints exist while a
 graph turn is running and are deleted after the controlled response is stored.

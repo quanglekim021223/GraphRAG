@@ -2,7 +2,7 @@
 
 The search provider is used only to retrieve snippets. The application disables
 provider-generated answers, post-filters every result URL, and returns the
-approved snippets verbatim with citations. Patient-identifying queries are
+allowlisted snippets with citations. Patient-identifying queries are
 rejected before any network request.
 """
 import copy
@@ -31,8 +31,8 @@ MAX_QUESTION_LENGTH = 500
 MAX_REDIRECTS = 3
 REDIRECT_CODES = frozenset({301, 302, 303, 307, 308})
 NO_GUIDELINE_RESULT = (
-    "Không tìm thấy thông tin phù hợp trong các nguồn hướng dẫn y khoa đã "
-    "được phê duyệt. Vui lòng hỏi cụ thể hơn hoặc tham khảo chuyên gia."
+    "Không tìm thấy thông tin phù hợp trong các nguồn hướng dẫn y khoa thuộc "
+    "allowlist. Vui lòng hỏi cụ thể hơn hoặc tham khảo chuyên gia."
 )
 SEARCH_UNAVAILABLE = (
     "Nguồn hướng dẫn y khoa hiện chưa được cấu hình hoặc tạm thời không khả "
@@ -375,7 +375,7 @@ def search_medical_guidelines(
     sleeper: Callable[[float], None] = time.sleep,
     utcnow: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
 ) -> Dict[str, Any]:
-    """Retrieve approved source snippets and render citations without synthesis."""
+    """Retrieve allowlisted source snippets for discovery without synthesis."""
     if contains_sensitive_patient_data(question):
         audit_event("medical_search_rejected_sensitive_input", level="warning")
         return {"status": "privacy_denied", "response": SENSITIVE_SEARCH_REFUSAL}
@@ -510,7 +510,7 @@ def search_medical_guidelines(
         return result
 
     retrieved_at = utcnow().astimezone(timezone.utc).isoformat()
-    lines = ["Thông tin từ các nguồn hướng dẫn y khoa đã được phê duyệt:"]
+    lines = ["Thông tin discovery từ các nguồn y khoa trong allowlist:"]
     evidence = []
     for index, result in enumerate(approved_results, start=1):
         source_id = f"S{index}"

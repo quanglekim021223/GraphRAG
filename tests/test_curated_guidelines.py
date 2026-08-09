@@ -9,6 +9,7 @@ from psycopg import sql
 
 from src.handlers.curated_guidelines import (
     CURATED_CORPUS_EMPTY,
+    TRUSTED_OFFICIAL_STATUS,
     CuratedGuidelineStore,
     DocumentMetadata,
     DownloadedDocument,
@@ -19,6 +20,7 @@ from src.handlers.curated_guidelines import (
     extract_sections,
     ingest_guideline,
     retrieve_curated_guidelines,
+    retrieve_guidelines_with_auto_ingest,
 )
 from src.handlers.medical_guideline_search import SENSITIVE_SEARCH_REFUSAL
 
@@ -349,6 +351,89 @@ class CuratedGuidelineTests(unittest.TestCase):
         self.assertTrue(matches)
         self.assertTrue(all(item["version"] == "2026.2" for item in matches))
 
+    def test_corpus_miss_auto_ingests_full_trusted_official_document(self):
+        self._require_store()
+        search_calls = []
+        download_calls = []
+
+        def searcher(**kwargs):
+            search_calls.append(kwargs)
+            return {
+                "status": "success",
+                "evidence": [{
+                    "title": "WHO hypertension guidance",
+                    "final_url": SOURCE_URL,
+                    "source_name": "WHO",
+                    "publication_date": "2026-01-01",
+                }],
+            }
+
+        def downloader(url):
+            download_calls.append(url)
+            return _downloaded(
+                b"<h1>Hypertension treatment</h1>"
+                b"<p>Assess cardiovascular risk before treatment.</p>"
+            )
+
+        result = retrieve_guidelines_with_auto_ingest(
+            question="Hướng dẫn tăng huyết áp",
+            postgres_uri=self.postgres_uri,
+            endpoint="unused",
+            api_key="unused",
+            embedding_model=self.embedder.model,
+            tavily_api_key="tavily-key",
+            top_k=1,
+            min_score=0.8,
+            embedder=self.embedder,
+            on_date=date(2026, 1, 10),
+            store=self.store,
+            searcher=searcher,
+            downloader=downloader,
+        )
+
+        self.assertEqual("success", result["status"])
+        self.assertEqual(1, len(result["auto_ingest"]["ingested"]))
+        self.assertEqual(TRUSTED_OFFICIAL_STATUS,
+                         result["evidence"][0]["review_status"])
+        self.assertIn("Nguồn chính thức tự động xác minh", result["response"])
+        self.assertEqual(1, len(search_calls))
+        self.assertEqual([SOURCE_URL], download_calls)
+        self.assertEqual(
+            TRUSTED_OFFICIAL_STATUS,
+            self.store.list_documents()[0]["review_status"],
+        )
+
+    def test_auto_ingest_rejects_candidate_without_publication_date(self):
+        self._require_store()
+        download_calls = []
+
+        result = retrieve_guidelines_with_auto_ingest(
+            question="Hướng dẫn tăng huyết áp",
+            postgres_uri=self.postgres_uri,
+            endpoint="unused",
+            api_key="unused",
+            embedding_model=self.embedder.model,
+            tavily_api_key="tavily-key",
+            embedder=self.embedder,
+            on_date=date(2026, 1, 10),
+            store=self.store,
+            searcher=lambda **_kwargs: {
+                "status": "success",
+                "evidence": [{
+                    "title": "WHO hypertension guidance",
+                    "final_url": SOURCE_URL,
+                    "source_name": "WHO",
+                    "publication_date": None,
+                }],
+            },
+            downloader=lambda url: download_calls.append(url),
+        )
+
+        self.assertEqual("corpus_empty", result["status"])
+        self.assertEqual("not_found", result["auto_ingest"]["status"])
+        self.assertEqual(1, result["auto_ingest"]["skipped"])
+        self.assertEqual([], download_calls)
+
     def test_expired_or_withdrawn_document_is_not_retrievable(self):
         self._require_store()
         expired_metadata = _metadata(effective_until="2026-01-05")
@@ -415,6 +500,25 @@ class CuratedGuidelineTests(unittest.TestCase):
 
         self.assertEqual("privacy_denied", result["status"])
         self.assertEqual(SENSITIVE_SEARCH_REFUSAL, result["response"])
+        self.assertEqual([], self.embedder.calls)
+
+    def test_sensitive_question_never_reaches_auto_ingest_search(self):
+        search_calls = []
+
+        result = retrieve_guidelines_with_auto_ingest(
+            question="patient_id P-123 đang dùng thuốc gì?",
+            postgres_uri="postgresql://unused:unused@127.0.0.1:1/unused",
+            endpoint="unused",
+            api_key="unused",
+            embedding_model=self.embedder.model,
+            tavily_api_key="tavily-key",
+            embedder=self.embedder,
+            searcher=lambda **kwargs: search_calls.append(kwargs),
+        )
+
+        self.assertEqual("privacy_denied", result["status"])
+        self.assertEqual(SENSITIVE_SEARCH_REFUSAL, result["response"])
+        self.assertEqual([], search_calls)
         self.assertEqual([], self.embedder.calls)
 
 

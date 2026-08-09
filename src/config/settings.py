@@ -80,6 +80,12 @@ class Config:
     curated_retrieval_min_score: float = float(
         os.getenv("CURATED_RETRIEVAL_MIN_SCORE", "0.45")
     )
+    curated_auto_ingest_enabled: bool = os.getenv(
+        "CURATED_AUTO_INGEST_ENABLED", "true"
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    curated_auto_ingest_max_documents: int = int(
+        os.getenv("CURATED_AUTO_INGEST_MAX_DOCUMENTS", "2")
+    )
 
     _instance = None
 
@@ -159,6 +165,12 @@ class Config:
             self.curated_retrieval_min_score = float(
                 os.getenv("CURATED_RETRIEVAL_MIN_SCORE", "0.45")
             )
+            self.curated_auto_ingest_enabled = os.getenv(
+                "CURATED_AUTO_INGEST_ENABLED", "true"
+            ).strip().lower() in {"1", "true", "yes", "on"}
+            self.curated_auto_ingest_max_documents = int(
+                os.getenv("CURATED_AUTO_INGEST_MAX_DOCUMENTS", "2")
+            )
             self._initialized = True
 
     def validate(self) -> None:
@@ -194,6 +206,10 @@ class Config:
             )
         if self.memory_raw_retention_days < 1:
             raise ValueError("MEMORY_RAW_RETENTION_DAYS must be at least 1")
+        if not 1 <= self.curated_auto_ingest_max_documents <= 3:
+            raise ValueError(
+                "CURATED_AUTO_INGEST_MAX_DOCUMENTS must be between 1 and 3"
+            )
 
 
 # Configure LangSmith only when explicitly enabled. Forcing tracing on can send

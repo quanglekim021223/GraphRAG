@@ -461,52 +461,56 @@ phù hợp làm answer path chính trong healthcare.
 
 ---
 
-## Vòng 7 — Phase 2: curated ingestion, tách discovery khỏi trust
+## Vòng 7 — Phase 2: trusted full-document ingestion
 
 ### Câu hỏi khởi phát
 
-Làm sao biết document nào đã được review, version nào đang có hiệu lực và section
-nào thực sự hỗ trợ output?
+Làm sao tự động hóa coverage từ nguồn chính thống mà không dùng snippet Tavily
+làm evidence và không bắt con người duyệt mọi URL?
 
 ### Pipeline hiện tại
 
 ```text
-Tavily discovery
-→ controlled download từ allowlisted URL
-→ lưu raw bytes + SHA-256 + metadata ở pending_review
-→ reviewer xem bundle/preview
-→ approve đúng expected hash
+local approved/trusted retrieval
+→ nếu miss: Tavily tìm candidate trong exact whitelist
+→ yêu cầu publication date rõ ràng
+→ controlled full-document download
+→ SHA-256 snapshot version + deduplication
 → full-text extraction
 → chunk trong section/page boundary
 → embedding
 → PostgreSQL guideline_documents + guideline_sections
-→ activate document version
-→ section-level retrieval + [G*]
+→ auto-activate với review_status=trusted_official
+→ retry section-level retrieval + [G*]
 ```
 
 ### Invariants quan trọng
 
-- Candidate `pending_review` chưa có vectors trong `guideline_sections`.
-- Approve yêu cầu reviewer identity và expected content hash.
-- Nếu hash hoặc state đổi giữa lúc review và commit, approval fail.
-- Approval lưu section/document hash, reviewer, review time và embedding model.
-- Version mới của cùng source URL được approve sẽ supersede bản active cũ.
-- Retrieval chỉ đọc document `approved + active`, đúng embedding model và nằm
-  trong effective date window.
+- Tavily snippet không bao giờ được lưu làm corpus content.
+- Auto-ingestion chỉ nhận exact host/path allowlist, final redirect hợp lệ,
+  publication date không nằm trong tương lai và content type được hỗ trợ.
+- Full document được download lại bằng backend, hash và version theo content.
+- Version mới của cùng source URL sẽ supersede bản active cũ.
+- Retrieval chỉ đọc `approved` hoặc `trusted_official` đang `active`, đúng
+  embedding model và nằm trong effective date window.
+- Manual `pending_review → approved` vẫn tồn tại nếu policy nội bộ yêu cầu
+  duyệt một tài liệu chính thức trước khi sử dụng.
 - Output là extractive section text kèm title, heading, URL, publication date,
   version và `[G*]`; ReAct không paraphrase lại.
 
 ### Vai trò Tavily hiện tại
 
-Tavily chỉ nằm trong admin command `discover`. `medical_guideline_tool` trên
-chat answer path gọi `retrieve_curated_guidelines()`, không fallback sang live
-search nếu corpus trống hoặc provider lỗi.
+Tavily nằm trong conditional runtime fallback khi local corpus miss và vẫn có
+admin command `discover`. Nó chỉ tìm URL; backend download full document rồi
+index vào PostgreSQL trước khi retry. Không có fallback ra ngoài whitelist.
 
 ### Giới hạn
 
-- Metadata publication/effective/version do người ingest cung cấp và reviewer
-  chịu trách nhiệm kiểm tra; hash chỉ chứng minh integrity, không chứng minh nội
-  dung đúng về mặt lâm sàng.
+- Publication date của auto-ingestion phụ thuộc metadata Tavily; thiếu hoặc nằm
+  trong tương lai thì candidate bị loại. Hash chứng minh integrity/snapshot,
+  không chứng minh nội dung đúng về mặt lâm sàng hay còn là khuyến nghị mới nhất.
+- Corpus miss đầu tiên có latency của search + full download + embedding; các
+  request sau dùng document đã persist.
 - PostgreSQL lưu raw document, review/version metadata và section embeddings;
   cosine hiện vẫn được tính bằng Python nên phù hợp corpus nhỏ.
 - Corpus lớn cần pgvector hoặc một reviewed vector service, không cần đổi
@@ -623,7 +627,9 @@ ReAct chọn medical_guideline_tool
 → current question lấy từ trusted ContextVar
 → sensitive-data gate
 → embed query
-→ retrieve approved + active + effective sections
+→ retrieve approved/trusted-official + active + effective sections
+→ miss thì strict Tavily URL discovery + full-document auto-ingestion
+→ retry local retrieval
 → extractive response + [G*]
 → return_direct
 → user
@@ -734,8 +740,8 @@ enforcement riêng.
 | Doctor-scoped parameterized Cypher | Có trong code và unit tests |
 | Startup fail nếu Patient thiếu authorization fields | Có trong code và unit tests |
 | Evidence `[E*]` map exact row/field/value | Có trong code và unit tests |
-| Curated approved/effective section retrieval `[G*]` | Có trong code và unit tests |
-| Tavily chỉ dùng cho admin discovery | Có trong reachable code path |
+| Approved/trusted-official section retrieval `[G*]` | Có trong code và PostgreSQL integration tests |
+| Tavily conditional auto-ingestion trên corpus miss | Có trong reachable code path và integration test |
 | Policy-driven patient + guideline workflow | Có cho 3 intents |
 | PostgreSQL doctor-scoped memory + rolling summary | Có trong code, unit test và local integration smoke |
 | Test-result clinical interpretation | Chưa hỗ trợ do data contract thiếu |
@@ -834,8 +840,9 @@ judge và confidence/cherry-picking control.
 - [ ] Nêu được giới hạn semantic của response template.
 - [ ] Phân biệt early scope lookup với mandatory query scope enforcement.
 - [ ] Chủ động nêu gap `X-Doctor-ID` chưa phải verified identity.
-- [ ] Giải thích Tavily discovery khác curated answer path.
-- [ ] Giải thích pending document chưa có vector và approve cần exact hash.
+- [ ] Giải thích Tavily chỉ tìm URL, còn backend download full document để index.
+- [ ] Giải thích `trusted_official` khác internal `approved` và vì sao snippet
+  không được dùng làm corpus content.
 - [ ] Nêu ba composite intents hiện được hỗ trợ.
 - [ ] Giải thích vì sao test-result interpretation chưa được hỗ trợ.
 - [ ] Mô tả ReAct là policy-aware bounded orchestrator.

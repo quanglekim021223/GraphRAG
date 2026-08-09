@@ -1,10 +1,10 @@
-"""Curated medical-guideline ingestion and section-level retrieval.
+"""Trusted medical-guideline ingestion and section-level retrieval.
 
-The answer path reads only explicitly approved, currently effective document
-versions. Downloads, review state, hashes, extracted sections and embeddings
-are persisted in PostgreSQL alongside the application's operational state.
-Retrieval is extractive and deterministic: the model never rewrites a
-guideline claim.
+The answer path reads either internally approved documents or documents
+automatically admitted by the exact official-source policy. On a corpus miss,
+the bounded fallback can discover, download, validate, chunk and embed an
+official document before retrying retrieval. Retrieval remains extractive and
+deterministic: the model never rewrites a guideline claim.
 """
 import atexit
 import hashlib
@@ -31,7 +31,9 @@ from psycopg_pool import ConnectionPool, PoolTimeout
 from src.handlers.medical_guideline_search import (
     SENSITIVE_SEARCH_REFUSAL,
     contains_sensitive_patient_data,
+    is_approved_source_url,
     resolve_approved_final_url,
+    search_medical_guidelines,
 )
 from src.handlers.security_guardrails import audit_event
 from src.helpers.logging_config import logger
@@ -39,6 +41,13 @@ from src.helpers.logging_config import logger
 
 MAX_DOCUMENT_BYTES = 10_000_000
 MAX_SECTIONS_PER_DOCUMENT = 1000
+TRUSTED_OFFICIAL_STATUS = "trusted_official"
+INTERNAL_APPROVED_STATUS = "approved"
+TRUSTED_OFFICIAL_ACTOR = "system:trusted-official-policy-v1"
+RETRIEVABLE_REVIEW_STATUSES = (
+    INTERNAL_APPROVED_STATUS,
+    TRUSTED_OFFICIAL_STATUS,
+)
 SUPPORTED_CONTENT_TYPES = {
     "application/pdf",
     "text/html",
@@ -46,16 +55,16 @@ SUPPORTED_CONTENT_TYPES = {
     "text/plain",
 }
 CURATED_CORPUS_EMPTY = (
-    "Kho hướng dẫn y khoa chưa có tài liệu đã duyệt và còn hiệu lực. "
-    "Hệ thống sẽ không dùng kết quả tìm kiếm web làm câu trả lời thay thế."
+    "Kho hướng dẫn y khoa chưa có tài liệu nội bộ đã duyệt hoặc tài liệu chính "
+    "thức đủ điều kiện tự động nạp."
 )
 CURATED_RETRIEVAL_UNAVAILABLE = (
     "Kho hướng dẫn y khoa hiện không thể truy xuất. Hệ thống sẽ không tạo "
     "câu trả lời không có nguồn."
 )
 CURATED_NO_RESULT = (
-    "Không tìm thấy section đủ liên quan trong các hướng dẫn đã duyệt và còn "
-    "hiệu lực. Vui lòng hỏi cụ thể hơn hoặc kiểm tra tài liệu nguồn."
+    "Không tìm thấy section đủ liên quan trong các hướng dẫn đang được phép "
+    "sử dụng. Vui lòng hỏi cụ thể hơn hoặc kiểm tra tài liệu nguồn."
 )
 SOURCE_DIFFERENCE_WARNING = (
     "Các section được hiển thị riêng theo thứ tự relevance; hệ thống không tự "
@@ -64,7 +73,7 @@ SOURCE_DIFFERENCE_WARNING = (
 
 
 class GuidelineIngestionError(ValueError):
-    """Raised when a candidate cannot safely enter the review queue."""
+    """Raised when a candidate cannot safely enter the trusted corpus."""
 
 
 class EmbeddingProviderError(RuntimeError):
@@ -92,7 +101,7 @@ class DownloadedDocument:
 
 @dataclass(frozen=True)
 class DocumentMetadata:
-    """Human-supplied metadata that is reviewed before activation."""
+    """Version metadata supplied by an admin or strict official-source policy."""
 
     title: str
     publisher: str
@@ -301,9 +310,72 @@ class CuratedGuidelineStore:
         max_chunk_chars: int = 2200,
         chunk_overlap_chars: int = 200,
     ) -> Dict[str, Any]:
-        """Extract and index an inspected hash, then activate it atomically."""
+        """Activate one hash after explicit internal review."""
         if not reviewer.strip():
             raise GuidelineIngestionError("Reviewer identity is required")
+        return self._activate_document(
+            document_id=document_id,
+            actor=reviewer.strip(),
+            expected_content_hash=expected_content_hash,
+            embedder=embedder,
+            review_status=INTERNAL_APPROVED_STATUS,
+            reviewed_at=reviewed_at,
+            max_chunk_chars=max_chunk_chars,
+            chunk_overlap_chars=chunk_overlap_chars,
+        )
+
+    def activate_trusted_official(
+        self,
+        document_id: str,
+        expected_content_hash: str,
+        embedder: Any,
+        activated_at: Optional[datetime] = None,
+        max_chunk_chars: int = 2200,
+        chunk_overlap_chars: int = 200,
+    ) -> Dict[str, Any]:
+        """Auto-activate only a document whose stored URLs remain allowlisted."""
+        with self.pool.connection() as connection:
+            row = connection.execute(
+                """
+                SELECT source_url, final_url FROM guideline_documents
+                WHERE document_id = %s
+                """,
+                (document_id,),
+            ).fetchone()
+        if row is None:
+            raise GuidelineIngestionError("Document does not exist")
+        if not (
+            is_approved_source_url(row["source_url"])
+            and is_approved_source_url(row["final_url"])
+        ):
+            raise GuidelineIngestionError(
+                "Trusted-official activation requires exact allowlisted URLs"
+            )
+        return self._activate_document(
+            document_id=document_id,
+            actor=TRUSTED_OFFICIAL_ACTOR,
+            expected_content_hash=expected_content_hash,
+            embedder=embedder,
+            review_status=TRUSTED_OFFICIAL_STATUS,
+            reviewed_at=activated_at,
+            max_chunk_chars=max_chunk_chars,
+            chunk_overlap_chars=chunk_overlap_chars,
+        )
+
+    def _activate_document(
+        self,
+        document_id: str,
+        actor: str,
+        expected_content_hash: str,
+        embedder: Any,
+        review_status: str,
+        reviewed_at: Optional[datetime],
+        max_chunk_chars: int,
+        chunk_overlap_chars: int,
+    ) -> Dict[str, Any]:
+        """Extract, embed and activate one immutable pending document."""
+        if review_status not in RETRIEVABLE_REVIEW_STATUSES:
+            raise GuidelineIngestionError("Unsupported trusted review status")
         with self.pool.connection() as connection:
             row = connection.execute(
                 "SELECT * FROM guideline_documents WHERE document_id = %s",
@@ -319,7 +391,7 @@ class CuratedGuidelineStore:
             )
         if row["embedding_model"] != embedder.model:
             raise GuidelineIngestionError(
-                "Approval embedder does not match the candidate embedding model"
+                "Activation embedder does not match the candidate embedding model"
             )
 
         extracted = extract_sections(bytes(row["raw_content"]), row["content_type"])
@@ -338,7 +410,7 @@ class CuratedGuidelineStore:
             )
         except EmbeddingProviderError as error:
             raise GuidelineIngestionError(
-                "Approved document could not be embedded"
+                "Trusted document could not be embedded"
             ) from error
         _validate_embedding_batch(sections, embeddings)
         timestamp = (reviewed_at or datetime.now(timezone.utc)).astimezone(
@@ -393,7 +465,7 @@ class CuratedGuidelineStore:
                 UPDATE guideline_documents
                 SET effective_status = 'superseded'
                 WHERE source_url = %s AND document_id <> %s
-                  AND review_status = 'approved'
+                  AND review_status IN ('approved', 'trusted_official')
                   AND effective_status = 'active'
                 """,
                 (row["source_url"], document_id),
@@ -401,16 +473,17 @@ class CuratedGuidelineStore:
             connection.execute(
                 """
                 UPDATE guideline_documents
-                SET review_status = 'approved', effective_status = 'active',
+                SET review_status = %s, effective_status = 'active',
                     reviewed_at = %s, reviewed_by = %s
                 WHERE document_id = %s
                 """,
-                (timestamp, reviewer.strip(), document_id),
+                (review_status, timestamp, actor, document_id),
             )
         audit_event(
-            "curated_guideline_approved",
+            "curated_guideline_activated",
             document_id=document_id,
-            reviewer_hash=hashlib.sha256(reviewer.encode("utf-8")).hexdigest(),
+            review_status=review_status,
+            actor_hash=hashlib.sha256(actor.encode("utf-8")).hexdigest(),
             section_count=len(sections),
         )
         return self.get_document(document_id)
@@ -440,10 +513,17 @@ class CuratedGuidelineStore:
             ).fetchone()
             if row is None:
                 raise GuidelineIngestionError("Document does not exist")
-            if effective_status == "withdrawn" and row["review_status"] != "approved":
-                raise GuidelineIngestionError("Only approved documents can be withdrawn")
+            if (
+                effective_status == "withdrawn"
+                and row["review_status"] not in RETRIEVABLE_REVIEW_STATUSES
+            ):
+                raise GuidelineIngestionError(
+                    "Only active trusted documents can be withdrawn"
+                )
             if effective_status == "rejected" and row["review_status"] != "pending_review":
                 raise GuidelineIngestionError("Only pending documents can be rejected")
+            if effective_status == "withdrawn":
+                review_status = row["review_status"]
             connection.execute(
                 """
                 UPDATE guideline_documents
@@ -543,7 +623,8 @@ class CuratedGuidelineStore:
             row = connection.execute(
                 """
                 SELECT 1 FROM guideline_documents
-                WHERE review_status = 'approved' AND effective_status = 'active'
+                WHERE review_status IN ('approved', 'trusted_official')
+                  AND effective_status = 'active'
                   AND embedding_model = %s AND effective_from <= %s
                   AND (effective_until IS NULL OR effective_until >= %s)
                 LIMIT 1
@@ -570,10 +651,10 @@ class CuratedGuidelineStore:
                        d.document_id, d.title, d.publisher, d.publication_date,
                        d.version, d.effective_from, d.effective_until,
                        d.content_hash AS document_hash, d.final_url,
-                       d.reviewed_at, d.reviewed_by
+                       d.review_status, d.reviewed_at, d.reviewed_by
                 FROM guideline_sections s
                 JOIN guideline_documents d ON d.document_id = s.document_id
-                WHERE d.review_status = 'approved'
+                WHERE d.review_status IN ('approved', 'trusted_official')
                   AND d.effective_status = 'active'
                   AND d.embedding_model = %s AND d.effective_from <= %s
                   AND (d.effective_until IS NULL OR d.effective_until >= %s)
@@ -676,6 +757,113 @@ def ingest_guideline(
     )
 
 
+def auto_ingest_trusted_guidelines(
+    question: str,
+    store: CuratedGuidelineStore,
+    embedder: Any,
+    tavily_api_key: str,
+    max_documents: int = 2,
+    search_options: Optional[Dict[str, Any]] = None,
+    searcher: Callable[..., Dict[str, Any]] = search_medical_guidelines,
+    downloader: Callable[[str], DownloadedDocument] = download_approved_document,
+    on_date: Optional[date] = None,
+) -> Dict[str, Any]:
+    """Discover and auto-index strict official-source documents on a miss.
+
+    The policy never accepts a provider snippet as corpus content. It requires
+    an exact allowlisted final URL and an ISO publication date, downloads the
+    full document through the controlled downloader, versions it by full-content
+    hash, then activates it as ``trusted_official``.
+    """
+    if contains_sensitive_patient_data(question):
+        return {"status": "privacy_denied", "ingested": [], "skipped": 0}
+
+    safe_max_documents = max(1, min(int(max_documents), 3))
+    options = dict(search_options or {})
+    options["max_results"] = safe_max_documents
+    discovery = searcher(
+        question=question,
+        api_key=tavily_api_key,
+        **options,
+    )
+    if discovery.get("status") != "success":
+        return {
+            "status": discovery.get("status", "unavailable"),
+            "ingested": [],
+            "skipped": 0,
+        }
+
+    today = on_date or date.today()
+    ingested: List[Dict[str, Any]] = []
+    skipped = 0
+    for candidate in discovery.get("evidence", [])[:safe_max_documents]:
+        if not isinstance(candidate, dict):
+            skipped += 1
+            continue
+        final_url = str(candidate.get("final_url") or candidate.get("url") or "")
+        title = str(candidate.get("title") or "").strip()
+        publisher = str(candidate.get("source_name") or "").strip()
+        publication_date = _strict_publication_date(
+            candidate.get("publication_date"), today
+        )
+        if not (
+            final_url
+            and title
+            and publisher
+            and publication_date
+            and is_approved_source_url(final_url)
+        ):
+            skipped += 1
+            audit_event(
+                "trusted_guideline_candidate_skipped",
+                reason="missing_or_untrusted_metadata",
+            )
+            continue
+
+        try:
+            downloaded = downloader(final_url)
+            content_hash = hashlib.sha256(downloaded.content).hexdigest()
+            version = f"official-{publication_date}-{content_hash[:12]}"
+            document = store.add_pending_document(
+                downloaded=downloaded,
+                metadata=DocumentMetadata(
+                    title=title,
+                    publisher=publisher,
+                    publication_date=publication_date,
+                    version=version,
+                    effective_from=publication_date,
+                ),
+                embedding_model=embedder.model,
+            )
+            activated = store.activate_trusted_official(
+                document_id=document["document_id"],
+                expected_content_hash=document["content_hash"],
+                embedder=embedder,
+            )
+            ingested.append({
+                "document_id": activated["document_id"],
+                "final_url": activated["final_url"],
+                "version": activated["version"],
+                "content_hash": activated["content_hash"],
+                "review_status": activated["review_status"],
+            })
+        except (GuidelineIngestionError, OSError, ValueError) as error:
+            skipped += 1
+            audit_event(
+                "trusted_guideline_candidate_skipped",
+                reason=type(error).__name__,
+            )
+
+    status = "success" if ingested else "not_found"
+    audit_event(
+        "trusted_guideline_auto_ingest_completed",
+        status=status,
+        ingested_count=len(ingested),
+        skipped_count=skipped,
+    )
+    return {"status": status, "ingested": ingested, "skipped": skipped}
+
+
 def retrieve_curated_guidelines(
     question: str,
     postgres_uri: str,
@@ -727,17 +915,23 @@ def retrieve_curated_guidelines(
         return {"status": "not_found", "response": CURATED_NO_RESULT}
 
     retrieved_at = datetime.now(timezone.utc).isoformat()
-    lines = ["Nội dung từ các guideline đã duyệt và còn hiệu lực:"]
+    lines = ["Nội dung từ các guideline đang được phép sử dụng:"]
     evidence = []
     for index, match in enumerate(matches, start=1):
         evidence_id = f"G{index}"
+        trust_label = (
+            "Nội bộ đã duyệt"
+            if match["review_status"] == INTERNAL_APPROVED_STATUS
+            else "Nguồn chính thức tự động xác minh"
+        )
         lines.extend([
             "",
             f'[{evidence_id}] {match["title"]} — {match["heading"]}',
             match["content"],
             (
                 f'Nguồn: {match["final_url"]} | Phiên bản: {match["version"]} '
-                f'| Công bố: {match["publication_date"]}'
+                f'| Công bố: {match["publication_date"]} '
+                f'| Mức tin cậy: {trust_label}'
             ),
         ])
         evidence.append({"id": evidence_id, "retrieved_at": retrieved_at, **match})
@@ -754,6 +948,85 @@ def retrieve_curated_guidelines(
         "evidence": evidence,
         "retrieved_at": retrieved_at,
     }
+
+
+def retrieve_guidelines_with_auto_ingest(
+    question: str,
+    postgres_uri: str,
+    endpoint: str,
+    api_key: str,
+    embedding_model: str,
+    tavily_api_key: str,
+    top_k: int = 3,
+    min_score: float = 0.45,
+    auto_ingest_enabled: bool = True,
+    auto_ingest_max_documents: int = 2,
+    search_options: Optional[Dict[str, Any]] = None,
+    embedder: Optional[Any] = None,
+    on_date: Optional[date] = None,
+    store: Optional[CuratedGuidelineStore] = None,
+    searcher: Callable[..., Dict[str, Any]] = search_medical_guidelines,
+    downloader: Callable[[str], DownloadedDocument] = download_approved_document,
+) -> Dict[str, Any]:
+    """Retrieve locally, then auto-index strict official documents on a miss."""
+    if contains_sensitive_patient_data(question):
+        return {"status": "privacy_denied", "response": SENSITIVE_SEARCH_REFUSAL}
+    try:
+        active_store = store or get_curated_guideline_store(postgres_uri)
+        active_embedder = embedder or OpenAIEmbedder(
+            endpoint, api_key, embedding_model
+        )
+    except (PostgresError, PoolTimeout, EmbeddingProviderError, ValueError) as error:
+        logger.warning("Trusted guideline setup failed: %s", type(error).__name__)
+        return {"status": "unavailable", "response": CURATED_RETRIEVAL_UNAVAILABLE}
+
+    initial = retrieve_curated_guidelines(
+        question=question,
+        postgres_uri=postgres_uri,
+        endpoint=endpoint,
+        api_key=api_key,
+        embedding_model=embedding_model,
+        top_k=top_k,
+        min_score=min_score,
+        embedder=active_embedder,
+        on_date=on_date,
+        store=active_store,
+    )
+    if (
+        not auto_ingest_enabled
+        or initial.get("status") not in {"corpus_empty", "not_found"}
+    ):
+        return initial
+
+    ingestion = auto_ingest_trusted_guidelines(
+        question=question,
+        store=active_store,
+        embedder=active_embedder,
+        tavily_api_key=tavily_api_key,
+        max_documents=auto_ingest_max_documents,
+        search_options=search_options,
+        searcher=searcher,
+        downloader=downloader,
+        on_date=on_date,
+    )
+    if not ingestion["ingested"]:
+        initial["auto_ingest"] = ingestion
+        return initial
+
+    result = retrieve_curated_guidelines(
+        question=question,
+        postgres_uri=postgres_uri,
+        endpoint=endpoint,
+        api_key=api_key,
+        embedding_model=embedding_model,
+        top_k=top_k,
+        min_score=min_score,
+        embedder=active_embedder,
+        on_date=on_date,
+        store=active_store,
+    )
+    result["auto_ingest"] = ingestion
+    return result
 
 
 def extract_sections(content: bytes, content_type: str) -> List[Tuple[str, str]]:
@@ -938,6 +1211,19 @@ def _validate_metadata(metadata: DocumentMetadata) -> None:
         raise GuidelineIngestionError("effective_until precedes effective_from")
     if publication > effective_from:
         raise GuidelineIngestionError("publication_date follows effective_from")
+
+
+def _strict_publication_date(value: Any, today: date) -> Optional[str]:
+    """Accept an explicit ISO date only; never invent source publication data."""
+    text = str(value or "").strip()
+    try:
+        parsed = date.fromisoformat(text)
+    except ValueError:
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00")).date()
+        except ValueError:
+            return None
+    return parsed.isoformat() if parsed <= today else None
 
 
 def _parse_iso_date(value: str, field: str) -> date:

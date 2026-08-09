@@ -5,12 +5,12 @@ This module provides grounded Neo4j lookup and curated medical-guideline
 retrieval. No tool lets the outer ReAct agent rewrite controlled output.
 """
 from contextvars import ContextVar
-from typing import List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 from src.config.settings import Config
-from src.handlers.curated_guidelines import retrieve_curated_guidelines
+from src.handlers.curated_guidelines import retrieve_guidelines_with_auto_ingest
 from src.helpers.logging_config import logger
 from src.handlers.grounding_verifier import (
     format_grounded_response,
@@ -48,7 +48,7 @@ class PatientGuidelineToolInput(BaseModel):
     ] = Field(
         description=(
             "Approved clinical purpose for combining patient facts with the "
-            "reviewed guideline corpus."
+            "trusted official or internally approved guideline corpus."
         )
     )
     explicit_terms: List[str] = Field(
@@ -59,6 +59,38 @@ class PatientGuidelineToolInput(BaseModel):
             "from pronouns or conversation history."
         ),
     )
+
+
+def _guideline_options(config: Config, actor_id: str) -> Dict[str, Any]:
+    """Build the shared bounded trusted-guideline retrieval policy."""
+    return {
+        "postgres_uri": config.postgres_uri,
+        "endpoint": config.curated_embedding_endpoint,
+        "api_key": config.github_token,
+        "embedding_model": config.curated_embedding_model,
+        "tavily_api_key": config.tavily_api_key,
+        "top_k": config.curated_retrieval_top_k,
+        "min_score": config.curated_retrieval_min_score,
+        "auto_ingest_enabled": config.curated_auto_ingest_enabled,
+        "auto_ingest_max_documents": config.curated_auto_ingest_max_documents,
+        "search_options": {
+            "min_score": config.medical_search_min_score,
+            "actor_id": actor_id,
+            "cache_ttl_seconds": config.medical_search_cache_ttl_seconds,
+            "rate_limit_per_minute": config.medical_search_rate_limit_per_minute,
+            "daily_budget": config.medical_search_daily_budget,
+            "max_retries": config.medical_search_max_retries,
+            "max_retry_delay_seconds": (
+                config.medical_search_max_retry_delay_seconds
+            ),
+            "circuit_failure_threshold": (
+                config.medical_search_circuit_failure_threshold
+            ),
+            "circuit_cooldown_seconds": (
+                config.medical_search_circuit_cooldown_seconds
+            ),
+        },
+    }
 
 
 def get_last_query():
@@ -109,18 +141,13 @@ def rag_tool() -> str:
 
 @tool(return_direct=True)
 def medical_guideline_tool() -> str:
-    """Retrieve guidance for the trusted current question from reviewed documents."""
+    """Retrieve guidance from internal or strict official-source documents."""
     if not claim_request_tool("medical_guideline_tool"):
         return TOOL_CHAIN_BLOCKED_RESPONSE
     config = Config()
-    result = retrieve_curated_guidelines(
+    result = retrieve_guidelines_with_auto_ingest(
         question=get_current_user_question(),
-        postgres_uri=config.postgres_uri,
-        endpoint=config.curated_embedding_endpoint,
-        api_key=config.github_token,
-        embedding_model=config.curated_embedding_model,
-        top_k=config.curated_retrieval_top_k,
-        min_score=config.curated_retrieval_min_score,
+        **_guideline_options(config, get_current_doctor_id()),
     )
     return str(result["response"])
 
@@ -149,15 +176,8 @@ def patient_guideline_tool(
         explicit_terms=explicit_terms,
         doctor_id=get_current_doctor_id(),
         graphrag=graphrag_instance,
-        guideline_retriever=retrieve_curated_guidelines,
-        guideline_options={
-            "postgres_uri": config.postgres_uri,
-            "endpoint": config.curated_embedding_endpoint,
-            "api_key": config.github_token,
-            "embedding_model": config.curated_embedding_model,
-            "top_k": config.curated_retrieval_top_k,
-            "min_score": config.curated_retrieval_min_score,
-        },
+        guideline_retriever=retrieve_guidelines_with_auto_ingest,
+        guideline_options=_guideline_options(config, get_current_doctor_id()),
     )
     logger.info(
         "Patient-guideline workflow completed with status: %s",
