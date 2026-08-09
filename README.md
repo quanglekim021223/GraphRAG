@@ -5,7 +5,7 @@
 ![Healthcare GraphRAG](https://img.shields.io/badge/Healthcare-GraphRAG-blue)
 ![Python](https://img.shields.io/badge/Python-3.9+-green)
 ![Neo4j](https://img.shields.io/badge/Patient_Data-Neo4j-brightgreen)
-![PostgreSQL](https://img.shields.io/badge/Memory-PostgreSQL-blue)
+![PostgreSQL](https://img.shields.io/badge/Operational_State-PostgreSQL-blue)
 ![Azure OpenAI](https://img.shields.io/badge/AI-Azure_OpenAI-orange)
 ![LangChain](https://img.shields.io/badge/Framework-LangChain-yellow)
 ![LangGraph](https://img.shields.io/badge/Framework-LangGraph-purple)
@@ -106,7 +106,7 @@ Healthcare GraphRAG là một ứng dụng theo mô hình kiến trúc phân l�
 
 4. **Lớp dữ liệu**:
    - Neo4j Graph Database (nguồn dữ liệu bệnh nhân và quan hệ y tế)
-   - PostgreSQL (LangGraph checkpoint, hội thoại và rolling summary)
+   - PostgreSQL (checkpoint, hội thoại, rolling summary và curated guideline corpus)
    - Azure OpenAI (Mô hình ngôn ngữ)
 
 ## 📋 Điều kiện tiên quyết
@@ -120,7 +120,8 @@ Healthcare GraphRAG là một ứng dụng theo mô hình kiến trúc phân l�
 ### Cấu hình môi trường
 Sao chép file `.env.example` thành `.env` và điền các giá trị:
 - `NEO4J_PASSWORD`: Đặt mật khẩu bất kỳ cho Neo4j (ví dụ: `password123`).
-- `POSTGRES_URI`: DSN PostgreSQL dùng cho checkpoint và conversation memory.
+- `POSTGRES_URI`: DSN PostgreSQL dùng cho checkpoint, conversation memory và
+  curated guideline corpus.
 - `LANGCHAIN_API_KEY`: Lấy từ [LangSmith](https://smith.langchain.com/) sau khi đăng ký.
 - `GITHUB_TOKEN`: Tạo từ [GitHub Settings](https://github.com/settings/tokens) nếu cần.
 - `TAVILY_API_KEY`: Bật tìm kiếm guideline y khoa. Nếu thiếu key, tool sẽ
@@ -352,6 +353,12 @@ state in one transaction. It records reviewer/time/hash and automatically marks
 an older active version of the same source URL as `superseded`. Admins can also
 `reject` pending candidates or `withdraw` approved documents.
 
+The catalog, immutable raw bytes and section embeddings are stored in the same
+PostgreSQL instance configured by `POSTGRES_URI`, using the independent
+`guideline_documents` and `guideline_sections` tables. Schema creation is
+idempotent. Embeddings currently use PostgreSQL arrays and deterministic cosine
+ranking in Python, so no pgvector extension is required for the bounded corpus.
+
 At query time only documents with `review_status=approved`,
 `effective_status=active`, a matching embedding model and a valid effective date
 are eligible. Responses contain verbatim section text, title, heading, source
@@ -387,8 +394,17 @@ facts remain GraphRAG-only. The workflow displays record facts and extractive
 guideline sections side by side and does not infer causality, diagnose,
 prescribe, or resolve disagreement between sources.
 
-The SQLite cosine scan is intentionally sized for a small curated corpus. A
-large corpus should move the same metadata contract to a real vector index.
+The Python cosine scan is intentionally sized for a small curated corpus. A
+large corpus should keep the PostgreSQL metadata contract and move ranking to a
+pgvector index or another reviewed vector service.
+
+PostgreSQL integration tests use an isolated temporary schema and require an
+explicit test DSN:
+
+```bash
+TEST_POSTGRES_URI=postgresql://healthcare:healthcare@localhost:5432/healthcare \
+  python3 -m unittest tests.test_curated_guidelines
+```
 PDFs use outline headings when available and otherwise fall back to page-level
 boundaries; scanned PDFs still require a separately reviewed OCR pipeline. An
 egress proxy remains necessary to close DNS-rebinding risk completely. Embedding uses

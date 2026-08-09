@@ -68,9 +68,6 @@ class Config:
     medical_search_circuit_cooldown_seconds: int = int(
         os.getenv("MEDICAL_SEARCH_CIRCUIT_COOLDOWN_SECONDS", "60")
     )
-    curated_guideline_db_path: str = os.getenv(
-        "CURATED_GUIDELINE_DB_PATH", "data/curated_guidelines.sqlite3"
-    )
     curated_embedding_endpoint: str = os.getenv(
         "CURATED_EMBEDDING_ENDPOINT", "https://models.github.ai/inference"
     )
@@ -148,9 +145,6 @@ class Config:
             )
             self.medical_search_circuit_cooldown_seconds = int(
                 os.getenv("MEDICAL_SEARCH_CIRCUIT_COOLDOWN_SECONDS", "60")
-            )
-            self.curated_guideline_db_path = os.getenv(
-                "CURATED_GUIDELINE_DB_PATH", "data/curated_guidelines.sqlite3"
             )
             self.curated_embedding_endpoint = os.getenv(
                 "CURATED_EMBEDDING_ENDPOINT",

@@ -1,8 +1,11 @@
 """Tests for reviewed, versioned medical-guideline ingestion and retrieval."""
-import tempfile
+import os
 import unittest
+import uuid
 from datetime import date, datetime, timezone
-from pathlib import Path
+
+import psycopg
+from psycopg import sql
 
 from src.handlers.curated_guidelines import (
     CURATED_CORPUS_EMPTY,
@@ -119,18 +122,56 @@ def _downloaded(content=b"Hypertension guidance"):
 
 
 class CuratedGuidelineTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.base_postgres_uri = os.getenv("TEST_POSTGRES_URI", "").strip()
+        cls.schema_name = f"curated_guideline_test_{uuid.uuid4().hex}"
+        cls.postgres_uri = ""
+        if cls.base_postgres_uri:
+            with psycopg.connect(
+                cls.base_postgres_uri, autocommit=True
+            ) as connection:
+                connection.execute(
+                    sql.SQL("CREATE SCHEMA {}").format(
+                        sql.Identifier(cls.schema_name)
+                    )
+                )
+            separator = "&" if "?" in cls.base_postgres_uri else "?"
+            cls.postgres_uri = (
+                f"{cls.base_postgres_uri}{separator}"
+                f"options=-csearch_path%3D{cls.schema_name}"
+            )
+
+    @classmethod
+    def tearDownClass(cls):
+        if cls.base_postgres_uri:
+            with psycopg.connect(
+                cls.base_postgres_uri, autocommit=True
+            ) as connection:
+                connection.execute(
+                    sql.SQL("DROP SCHEMA {} CASCADE").format(
+                        sql.Identifier(cls.schema_name)
+                    )
+                )
+
     def setUp(self):
-        self.temporary_directory = tempfile.TemporaryDirectory()
-        self.database_path = str(
-            Path(self.temporary_directory.name) / "guidelines.sqlite3"
-        )
-        self.store = CuratedGuidelineStore(self.database_path)
         self.embedder = _FakeEmbedder()
+        self.store = None
+        if self.postgres_uri:
+            self.store = CuratedGuidelineStore(self.postgres_uri)
+            with self.store.pool.connection() as connection:
+                connection.execute("TRUNCATE guideline_documents CASCADE")
 
     def tearDown(self):
-        self.temporary_directory.cleanup()
+        if self.store is not None:
+            self.store.close()
+
+    def _require_store(self):
+        if self.store is None:
+            self.skipTest("TEST_POSTGRES_URI is required for PostgreSQL store tests")
 
     def _add_pending(self, version="2026.1", content=b"version one"):
+        self._require_store()
         raw = (
             b"<h1>Hypertension</h1><p>" + content +
             b"</p><h2>Diabetes</h2><p>Monitor glucose.</p>"
@@ -216,6 +257,7 @@ class CuratedGuidelineTests(unittest.TestCase):
         ))
 
     def test_ingestion_is_pending_until_reviewed_hash_is_approved(self):
+        self._require_store()
         html = (
             b"<h1>Blood pressure treatment</h1>"
             b"<p>Hypertension requires cardiovascular risk assessment.</p>"
@@ -236,12 +278,13 @@ class CuratedGuidelineTests(unittest.TestCase):
         self.assertIn("cardiovascular risk", review_bundle["sections"][0]["content"])
         pending_result = retrieve_curated_guidelines(
             "Hướng dẫn tăng huyết áp",
-            self.database_path,
+            self.postgres_uri,
             "unused",
             "unused",
             self.embedder.model,
             embedder=self.embedder,
             on_date=date(2026, 1, 10),
+            store=self.store,
         )
         self.assertEqual("corpus_empty", pending_result["status"])
         self.assertEqual(CURATED_CORPUS_EMPTY, pending_result["response"])
@@ -266,7 +309,7 @@ class CuratedGuidelineTests(unittest.TestCase):
 
         result = retrieve_curated_guidelines(
             "Hướng dẫn tăng huyết áp",
-            self.database_path,
+            self.postgres_uri,
             "unused",
             "unused",
             self.embedder.model,
@@ -274,6 +317,7 @@ class CuratedGuidelineTests(unittest.TestCase):
             min_score=0.8,
             embedder=self.embedder,
             on_date=date(2026, 1, 10),
+            store=self.store,
         )
 
         self.assertEqual("success", result["status"])
@@ -306,6 +350,7 @@ class CuratedGuidelineTests(unittest.TestCase):
         self.assertTrue(all(item["version"] == "2026.2" for item in matches))
 
     def test_expired_or_withdrawn_document_is_not_retrievable(self):
+        self._require_store()
         expired_metadata = _metadata(effective_until="2026-01-05")
         expired = self.store.add_pending_document(
             _downloaded(),
@@ -359,11 +404,9 @@ class CuratedGuidelineTests(unittest.TestCase):
         )
 
     def test_sensitive_question_is_rejected_before_database_or_embedding(self):
-        untouched_path = str(Path(self.temporary_directory.name) / "unused.sqlite3")
-
         result = retrieve_curated_guidelines(
             "patient_id P-123 đang dùng thuốc gì?",
-            untouched_path,
+            "postgresql://unused:unused@127.0.0.1:1/unused",
             "unused",
             "unused",
             self.embedder.model,
@@ -372,7 +415,6 @@ class CuratedGuidelineTests(unittest.TestCase):
 
         self.assertEqual("privacy_denied", result["status"])
         self.assertEqual(SENSITIVE_SEARCH_REFUSAL, result["response"])
-        self.assertFalse(Path(untouched_path).exists())
         self.assertEqual([], self.embedder.calls)
 
 

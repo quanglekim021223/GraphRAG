@@ -4,6 +4,9 @@ import json
 import sys
 from typing import Any, Dict
 
+from psycopg import Error as PostgresError
+from psycopg_pool import PoolTimeout
+
 from src.config.settings import Config
 from src.handlers.curated_guidelines import (
     CuratedGuidelineStore,
@@ -35,7 +38,10 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Manage the reviewed medical-guideline corpus"
     )
-    parser.add_argument("--database", help="Override CURATED_GUIDELINE_DB_PATH")
+    parser.add_argument(
+        "--postgres-uri",
+        help="Override POSTGRES_URI for this admin command",
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     discover = subparsers.add_parser(
@@ -80,8 +86,8 @@ def _build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = _build_parser().parse_args()
     config = Config()
-    database_path = args.database or config.curated_guideline_db_path
-    store = CuratedGuidelineStore(database_path)
+    postgres_uri = args.postgres_uri or config.postgres_uri
+    store = None
     try:
         if args.command == "discover":
             result = search_medical_guidelines(
@@ -108,7 +114,9 @@ def main() -> int:
                 "candidates": result.get("evidence", []),
             }
             _print(candidates)
-        elif args.command == "ingest":
+        else:
+            store = CuratedGuidelineStore(postgres_uri)
+        if args.command == "ingest":
             _print(ingest_guideline(
                 store,
                 args.url,
@@ -135,9 +143,18 @@ def main() -> int:
             _print(store.reject(args.document_id, args.reviewer))
         elif args.command == "withdraw":
             _print(store.withdraw(args.document_id, args.reviewer))
-    except (EmbeddingProviderError, GuidelineIngestionError) as error:
+    except (
+        EmbeddingProviderError,
+        GuidelineIngestionError,
+        PoolTimeout,
+        PostgresError,
+        ValueError,
+    ) as error:
         print(f"Error: {error}", file=sys.stderr)
         return 2
+    finally:
+        if store is not None:
+            store.close()
     return 0
 
 

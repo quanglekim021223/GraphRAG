@@ -2,27 +2,31 @@
 
 The answer path reads only explicitly approved, currently effective document
 versions. Downloads, review state, hashes, extracted sections and embeddings
-are persisted in SQLite so the small corpus remains auditable without adding a
-separate vector service. Retrieval is extractive and deterministic: the model
-never rewrites a guideline claim.
+are persisted in PostgreSQL alongside the application's operational state.
+Retrieval is extractive and deterministic: the model never rewrites a
+guideline claim.
 """
+import atexit
 import hashlib
 import hmac
 import ipaddress
-import json
 import math
 import re
 import socket
-import sqlite3
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
+from functools import lru_cache
 from html.parser import HTMLParser
 from io import BytesIO
-from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
+
+from psycopg import Error as PostgresError
+from psycopg import IntegrityError
+from psycopg.rows import dict_row
+from psycopg_pool import ConnectionPool, PoolTimeout
 
 from src.handlers.medical_guideline_search import (
     SENSITIVE_SEARCH_REFUSAL,
@@ -135,45 +139,70 @@ class OpenAIEmbedder:
 
 
 class CuratedGuidelineStore:
-    """SQLite catalog containing immutable versions and section embeddings."""
+    """PostgreSQL catalog containing immutable versions and embeddings.
 
-    def __init__(self, database_path: str):
-        self.database_path = Path(database_path)
-        self.database_path.parent.mkdir(parents=True, exist_ok=True)
+    Embeddings remain ordinary PostgreSQL arrays and are ranked in Python. This
+    keeps the current small-corpus behavior while removing the single-host
+    SQLite dependency; pgvector can be added later without changing callers.
+    """
+
+    def __init__(
+        self,
+        postgres_uri: str,
+        pool: Optional[ConnectionPool] = None,
+    ) -> None:
+        if not postgres_uri and pool is None:
+            raise ValueError("PostgreSQL URI is required")
+        self._owns_pool = pool is None
+        self.pool = pool or ConnectionPool(
+            conninfo=postgres_uri,
+            min_size=1,
+            max_size=5,
+            timeout=10,
+            kwargs={
+                "autocommit": False,
+                "prepare_threshold": 0,
+                "row_factory": dict_row,
+            },
+            open=True,
+        )
+        if self._owns_pool:
+            self.pool.wait(timeout=10)
         self._initialize()
+        if self._owns_pool:
+            atexit.register(self.close)
 
-    def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(str(self.database_path))
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys = ON")
-        return connection
+    def close(self) -> None:
+        """Close an owned pool; injected pools remain owned by their caller."""
+        if self._owns_pool:
+            self.pool.close()
 
     def _initialize(self) -> None:
-        with self._connect() as connection:
-            connection.executescript(
-                """
+        statements = (
+            """
                 CREATE TABLE IF NOT EXISTS guideline_documents (
                     document_id TEXT PRIMARY KEY,
                     source_url TEXT NOT NULL,
                     final_url TEXT NOT NULL,
                     title TEXT NOT NULL,
                     publisher TEXT NOT NULL,
-                    publication_date TEXT NOT NULL,
+                    publication_date DATE NOT NULL,
                     version TEXT NOT NULL,
-                    effective_from TEXT NOT NULL,
-                    effective_until TEXT,
+                    effective_from DATE NOT NULL,
+                    effective_until DATE,
                     review_status TEXT NOT NULL,
                     effective_status TEXT NOT NULL,
                     content_type TEXT NOT NULL,
                     content_hash TEXT NOT NULL,
-                    raw_content BLOB NOT NULL,
+                    raw_content BYTEA NOT NULL,
                     embedding_model TEXT NOT NULL,
-                    downloaded_at TEXT NOT NULL,
-                    reviewed_at TEXT,
+                    downloaded_at TIMESTAMPTZ NOT NULL,
+                    reviewed_at TIMESTAMPTZ,
                     reviewed_by TEXT,
                     UNIQUE(source_url, version)
-                );
-
+                )
+            """,
+            """
                 CREATE TABLE IF NOT EXISTS guideline_sections (
                     section_id TEXT PRIMARY KEY,
                     document_id TEXT NOT NULL,
@@ -181,18 +210,22 @@ class CuratedGuidelineStore:
                     heading TEXT NOT NULL,
                     content TEXT NOT NULL,
                     content_hash TEXT NOT NULL,
-                    embedding_json TEXT NOT NULL,
+                    embedding DOUBLE PRECISION[] NOT NULL,
                     FOREIGN KEY(document_id) REFERENCES guideline_documents(document_id)
                         ON DELETE CASCADE,
                     UNIQUE(document_id, ordinal)
-                );
-
+                )
+            """,
+            """
                 CREATE INDEX IF NOT EXISTS idx_guideline_effective
                 ON guideline_documents(
                     review_status, effective_status, effective_from, effective_until
-                );
-                """
-            )
+                )
+            """,
+        )
+        with self.pool.connection() as connection:
+            for statement in statements:
+                connection.execute(statement)
 
     def add_pending_document(
         self,
@@ -211,10 +244,10 @@ class CuratedGuidelineStore:
         document_id = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:32]
         timestamp = (downloaded_at or datetime.now(timezone.utc)).astimezone(
             timezone.utc
-        ).isoformat()
+        )
 
         try:
-            with self._connect() as connection:
+            with self.pool.connection() as connection:
                 connection.execute(
                     """
                     INSERT INTO guideline_documents (
@@ -222,7 +255,10 @@ class CuratedGuidelineStore:
                         publication_date, version, effective_from, effective_until,
                         review_status, effective_status, content_type, content_hash,
                         raw_content, embedding_model, downloaded_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (
+                        %s, %s, %s, %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s, %s, %s, %s
+                    )
                     """,
                     (
                         document_id,
@@ -243,7 +279,7 @@ class CuratedGuidelineStore:
                         timestamp,
                     ),
                 )
-        except sqlite3.IntegrityError as error:
+        except IntegrityError as error:
             raise GuidelineIngestionError(
                 "This source URL and version already exist and are immutable"
             ) from error
@@ -268,9 +304,9 @@ class CuratedGuidelineStore:
         """Extract and index an inspected hash, then activate it atomically."""
         if not reviewer.strip():
             raise GuidelineIngestionError("Reviewer identity is required")
-        with self._connect() as connection:
+        with self.pool.connection() as connection:
             row = connection.execute(
-                "SELECT * FROM guideline_documents WHERE document_id = ?",
+                "SELECT * FROM guideline_documents WHERE document_id = %s",
                 (document_id,),
             ).fetchone()
         if row is None:
@@ -307,13 +343,14 @@ class CuratedGuidelineStore:
         _validate_embedding_batch(sections, embeddings)
         timestamp = (reviewed_at or datetime.now(timezone.utc)).astimezone(
             timezone.utc
-        ).isoformat()
+        )
 
-        with self._connect() as connection:
+        with self.pool.connection() as connection:
             current = connection.execute(
                 """
                 SELECT review_status, content_hash FROM guideline_documents
-                WHERE document_id = ?
+                WHERE document_id = %s
+                FOR UPDATE
                 """,
                 (document_id,),
             ).fetchone()
@@ -338,8 +375,8 @@ class CuratedGuidelineStore:
                     """
                     INSERT INTO guideline_sections (
                         section_id, document_id, ordinal, heading, content,
-                        content_hash, embedding_json
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                        content_hash, embedding
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
                         section_id,
@@ -348,14 +385,14 @@ class CuratedGuidelineStore:
                         heading,
                         content,
                         section_hash,
-                        json.dumps(list(vector), separators=(",", ":")),
+                        list(vector),
                     ),
                 )
             connection.execute(
                 """
                 UPDATE guideline_documents
                 SET effective_status = 'superseded'
-                WHERE source_url = ? AND document_id <> ?
+                WHERE source_url = %s AND document_id <> %s
                   AND review_status = 'approved'
                   AND effective_status = 'active'
                 """,
@@ -365,8 +402,8 @@ class CuratedGuidelineStore:
                 """
                 UPDATE guideline_documents
                 SET review_status = 'approved', effective_status = 'active',
-                    reviewed_at = ?, reviewed_by = ?
-                WHERE document_id = ?
+                    reviewed_at = %s, reviewed_by = %s
+                WHERE document_id = %s
                 """,
                 (timestamp, reviewer.strip(), document_id),
             )
@@ -393,9 +430,12 @@ class CuratedGuidelineStore:
     ) -> Dict[str, Any]:
         if not reviewer.strip():
             raise GuidelineIngestionError("Reviewer identity is required")
-        with self._connect() as connection:
+        with self.pool.connection() as connection:
             row = connection.execute(
-                "SELECT review_status FROM guideline_documents WHERE document_id = ?",
+                """
+                SELECT review_status FROM guideline_documents
+                WHERE document_id = %s FOR UPDATE
+                """,
                 (document_id,),
             ).fetchone()
             if row is None:
@@ -407,13 +447,13 @@ class CuratedGuidelineStore:
             connection.execute(
                 """
                 UPDATE guideline_documents
-                SET review_status = ?, effective_status = ?, reviewed_at = ?,
-                    reviewed_by = ? WHERE document_id = ?
+                SET review_status = %s, effective_status = %s, reviewed_at = %s,
+                    reviewed_by = %s WHERE document_id = %s
                 """,
                 (
                     review_status,
                     effective_status,
-                    datetime.now(timezone.utc).isoformat(),
+                    datetime.now(timezone.utc),
                     reviewer.strip(),
                     document_id,
                 ),
@@ -424,13 +464,13 @@ class CuratedGuidelineStore:
         return self.get_document(document_id)
 
     def get_document(self, document_id: str) -> Dict[str, Any]:
-        with self._connect() as connection:
+        with self.pool.connection() as connection:
             row = connection.execute(
                 """
                 SELECT d.*, COUNT(s.section_id) AS section_count
                 FROM guideline_documents d
                 LEFT JOIN guideline_sections s ON s.document_id = d.document_id
-                WHERE d.document_id = ? GROUP BY d.document_id
+                WHERE d.document_id = %s GROUP BY d.document_id
                 """,
                 (document_id,),
             ).fetchone()
@@ -443,12 +483,12 @@ class CuratedGuidelineStore:
     def get_review_bundle(self, document_id: str) -> Dict[str, Any]:
         """Return immutable metadata plus extracted section text for review."""
         document = self.get_document(document_id)
-        with self._connect() as connection:
+        with self.pool.connection() as connection:
             sections = [
                 dict(row) for row in connection.execute(
                     """
                     SELECT section_id, ordinal, heading, content, content_hash
-                    FROM guideline_sections WHERE document_id = ?
+                    FROM guideline_sections WHERE document_id = %s
                     ORDER BY ordinal
                     """,
                     (document_id,),
@@ -458,7 +498,7 @@ class CuratedGuidelineStore:
                 raw = connection.execute(
                     """
                     SELECT raw_content, content_type FROM guideline_documents
-                    WHERE document_id = ?
+                    WHERE document_id = %s
                     """,
                     (document_id,),
                 ).fetchone()
@@ -489,23 +529,23 @@ class CuratedGuidelineStore:
         """
         parameters: Tuple[Any, ...] = ()
         if review_status:
-            query += " WHERE review_status = ?"
+            query += " WHERE review_status = %s"
             parameters = (review_status,)
         query += " ORDER BY downloaded_at DESC"
-        with self._connect() as connection:
+        with self.pool.connection() as connection:
             return [dict(row) for row in connection.execute(query, parameters)]
 
     def has_effective_documents(
         self, embedding_model: str, on_date: Optional[date] = None
     ) -> bool:
-        today = (on_date or date.today()).isoformat()
-        with self._connect() as connection:
+        today = on_date or date.today()
+        with self.pool.connection() as connection:
             row = connection.execute(
                 """
                 SELECT 1 FROM guideline_documents
                 WHERE review_status = 'approved' AND effective_status = 'active'
-                  AND embedding_model = ? AND effective_from <= ?
-                  AND (effective_until IS NULL OR effective_until >= ?)
+                  AND embedding_model = %s AND effective_from <= %s
+                  AND (effective_until IS NULL OR effective_until >= %s)
                 LIMIT 1
                 """,
                 (embedding_model, today, today),
@@ -521,12 +561,12 @@ class CuratedGuidelineStore:
         on_date: Optional[date] = None,
     ) -> List[Dict[str, Any]]:
         """Rank effective sections by cosine similarity in the small corpus."""
-        today = (on_date or date.today()).isoformat()
-        with self._connect() as connection:
+        today = on_date or date.today()
+        with self.pool.connection() as connection:
             rows = connection.execute(
                 """
                 SELECT s.section_id, s.ordinal, s.heading, s.content,
-                       s.content_hash AS section_hash, s.embedding_json,
+                       s.content_hash AS section_hash, s.embedding,
                        d.document_id, d.title, d.publisher, d.publication_date,
                        d.version, d.effective_from, d.effective_until,
                        d.content_hash AS document_hash, d.final_url,
@@ -535,24 +575,30 @@ class CuratedGuidelineStore:
                 JOIN guideline_documents d ON d.document_id = s.document_id
                 WHERE d.review_status = 'approved'
                   AND d.effective_status = 'active'
-                  AND d.embedding_model = ? AND d.effective_from <= ?
-                  AND (d.effective_until IS NULL OR d.effective_until >= ?)
+                  AND d.embedding_model = %s AND d.effective_from <= %s
+                  AND (d.effective_until IS NULL OR d.effective_until >= %s)
                 """,
                 (embedding_model, today, today),
             ).fetchall()
 
         ranked = []
         for row in rows:
-            vector = json.loads(row["embedding_json"])
+            vector = row["embedding"]
             score = _cosine_similarity(query_vector, vector)
             if score < min_score:
                 continue
             item = dict(row)
-            item.pop("embedding_json")
+            item.pop("embedding")
             item["score"] = score
             ranked.append(item)
         ranked.sort(key=lambda item: (-item["score"], item["section_id"]))
         return ranked[:max(1, min(int(top_k), 10))]
+
+
+@lru_cache(maxsize=4)
+def get_curated_guideline_store(postgres_uri: str) -> CuratedGuidelineStore:
+    """Reuse one bounded PostgreSQL pool per configured corpus database."""
+    return CuratedGuidelineStore(postgres_uri)
 
 
 def download_approved_document(
@@ -632,7 +678,7 @@ def ingest_guideline(
 
 def retrieve_curated_guidelines(
     question: str,
-    database_path: str,
+    postgres_uri: str,
     endpoint: str,
     api_key: str,
     embedding_model: str,
@@ -640,20 +686,21 @@ def retrieve_curated_guidelines(
     min_score: float = 0.45,
     embedder: Optional[Any] = None,
     on_date: Optional[date] = None,
+    store: Optional[CuratedGuidelineStore] = None,
 ) -> Dict[str, Any]:
     """Return only effective section text with versioned, section-level citations."""
     if contains_sensitive_patient_data(question):
         audit_event("curated_guideline_rejected_sensitive_input", level="warning")
         return {"status": "privacy_denied", "response": SENSITIVE_SEARCH_REFUSAL}
     try:
-        store = CuratedGuidelineStore(database_path)
+        active_store = store or get_curated_guideline_store(postgres_uri)
         active_embedder = embedder or OpenAIEmbedder(endpoint, api_key, embedding_model)
         model = active_embedder.model
-        if not store.has_effective_documents(model, on_date):
+        if not active_store.has_effective_documents(model, on_date):
             audit_event("curated_guideline_corpus_empty")
             return {"status": "corpus_empty", "response": CURATED_CORPUS_EMPTY}
         query_vector = active_embedder.embed([question.strip()])[0]
-        matches = store.search(
+        matches = active_store.search(
             query_vector=query_vector,
             embedding_model=model,
             top_k=top_k,
@@ -664,7 +711,8 @@ def retrieve_curated_guidelines(
         EmbeddingProviderError,
         GuidelineIngestionError,
         OSError,
-        sqlite3.Error,
+        PostgresError,
+        PoolTimeout,
         ValueError,
     ) as error:
         logger.warning("Curated guideline retrieval failed: %s", type(error).__name__)

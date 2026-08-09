@@ -479,6 +479,7 @@ Tavily discovery
 → full-text extraction
 → chunk trong section/page boundary
 → embedding
+→ PostgreSQL guideline_documents + guideline_sections
 → activate document version
 → section-level retrieval + [G*]
 ```
@@ -506,7 +507,10 @@ search nếu corpus trống hoặc provider lỗi.
 - Metadata publication/effective/version do người ingest cung cấp và reviewer
   chịu trách nhiệm kiểm tra; hash chỉ chứng minh integrity, không chứng minh nội
   dung đúng về mặt lâm sàng.
-- SQLite cosine scan phù hợp corpus nhỏ.
+- PostgreSQL lưu raw document, review/version metadata và section embeddings;
+  cosine hiện vẫn được tính bằng Python nên phù hợp corpus nhỏ.
+- Corpus lớn cần pgvector hoặc một reviewed vector service, không cần đổi
+  metadata/review contract.
 - Scanned PDF cần OCR pipeline riêng.
 - Process-local cache/rate-limit/circuit state không phải shared distributed state.
 

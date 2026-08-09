@@ -75,7 +75,7 @@ class PatientGuidelineWorkflowTests(unittest.TestCase):
             doctor_id="doctor-1",
             graphrag=graph,
             guideline_retriever=retriever,
-            guideline_options={"database_path": "test.sqlite3"},
+            guideline_options={"postgres_uri": "postgresql://test/test"},
         )
 
         self.assertEqual("success", result["status"])

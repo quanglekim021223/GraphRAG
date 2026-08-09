@@ -115,7 +115,7 @@ def medical_guideline_tool() -> str:
     config = Config()
     result = retrieve_curated_guidelines(
         question=get_current_user_question(),
-        database_path=config.curated_guideline_db_path,
+        postgres_uri=config.postgres_uri,
         endpoint=config.curated_embedding_endpoint,
         api_key=config.github_token,
         embedding_model=config.curated_embedding_model,
@@ -151,7 +151,7 @@ def patient_guideline_tool(
         graphrag=graphrag_instance,
         guideline_retriever=retrieve_curated_guidelines,
         guideline_options={
-            "database_path": config.curated_guideline_db_path,
+            "postgres_uri": config.postgres_uri,
             "endpoint": config.curated_embedding_endpoint,
             "api_key": config.github_token,
             "embedding_model": config.curated_embedding_model,
