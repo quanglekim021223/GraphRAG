@@ -41,6 +41,7 @@ from src.helpers.logging_config import logger
 
 MAX_DOCUMENT_BYTES = 10_000_000
 MAX_SECTIONS_PER_DOCUMENT = 1000
+MAX_PREWARM_TOPICS = 20
 TRUSTED_OFFICIAL_STATUS = "trusted_official"
 INTERNAL_APPROVED_STATUS = "approved"
 TRUSTED_OFFICIAL_ACTOR = "system:trusted-official-policy-v1"
@@ -69,6 +70,18 @@ CURATED_NO_RESULT = (
 SOURCE_DIFFERENCE_WARNING = (
     "Các section được hiển thị riêng theo thứ tự relevance; hệ thống không tự "
     "giải quyết khác biệt giữa các guideline."
+)
+DEFAULT_PREWARM_TOPICS = (
+    "Hypertension and cardiovascular risk management clinical guideline",
+    "Diabetes diagnosis and management clinical guideline",
+    "Antimicrobial use and infectious disease clinical guideline",
+    "Asthma and chronic respiratory disease clinical guideline",
+    "Medication safety and drug interaction clinical guideline",
+    "Blood transfusion compatibility clinical guideline",
+    "Emergency care and sepsis clinical guideline",
+    "Maternal and pregnancy care clinical guideline",
+    "Child health and pediatric care clinical guideline",
+    "Chronic kidney and liver disease clinical guideline",
 )
 
 
@@ -1048,6 +1061,114 @@ def retrieve_guidelines_with_auto_ingest(
     )
     result["auto_ingest"] = ingestion
     return result
+
+
+def prewarm_guideline_corpus(
+    topics: Sequence[str],
+    retrieval_options: Dict[str, Any],
+    retriever: Optional[Callable[..., Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """Populate missing high-value topics outside the user request path.
+
+    This coordinator deliberately reuses the runtime corpus-first pipeline:
+    covered topics make no Tavily call, while misses use the same bounded
+    discovery, full-document validation and ingestion policy as production.
+    """
+    normalized_topics: List[str] = []
+    seen = set()
+    for raw_topic in topics:
+        topic = " ".join(str(raw_topic).split())
+        if not topic or contains_sensitive_patient_data(topic):
+            raise ValueError("Prewarm topics must be de-identified medical queries")
+        key = topic.casefold()
+        if key not in seen:
+            normalized_topics.append(topic)
+            seen.add(key)
+    if not normalized_topics:
+        raise ValueError("At least one prewarm topic is required")
+    if len(normalized_topics) > MAX_PREWARM_TOPICS:
+        raise ValueError(
+            f"Prewarm accepts at most {MAX_PREWARM_TOPICS} unique topics"
+        )
+
+    active_retriever = retriever or retrieve_guidelines_with_auto_ingest
+    options = dict(retrieval_options)
+    options["auto_ingest_enabled"] = True
+    details = []
+    counts = {
+        "already_covered": 0,
+        "warmed": 0,
+        "not_covered": 0,
+        "documents_ingested": 0,
+    }
+    stopped_reason = None
+    terminal_ingestion_statuses = {
+        "unavailable", "rate_limited", "budget_exhausted", "circuit_open"
+    }
+
+    for topic in normalized_topics:
+        result = active_retriever(question=topic, **options)
+        ingestion = result.get("auto_ingest", {})
+        if not isinstance(ingestion, dict):
+            ingestion = {}
+        ingested = ingestion.get("ingested", [])
+        document_count = len(ingested) if isinstance(ingested, list) else 0
+        counts["documents_ingested"] += document_count
+
+        if result.get("status") == "success" and document_count:
+            outcome = "warmed"
+            counts["warmed"] += 1
+        elif result.get("status") == "success":
+            outcome = "already_covered"
+            counts["already_covered"] += 1
+        else:
+            outcome = "not_covered"
+            counts["not_covered"] += 1
+        details.append({
+            "topic": topic,
+            "outcome": outcome,
+            "retrieval_status": result.get("status", "unknown"),
+            "ingestion_status": ingestion.get("status"),
+            "documents_ingested": document_count,
+        })
+
+        ingestion_status = ingestion.get("status")
+        retrieval_status = result.get("status")
+        terminal_status = (
+            ingestion_status
+            if ingestion_status in terminal_ingestion_statuses
+            else retrieval_status
+        )
+        if terminal_status in terminal_ingestion_statuses:
+            stopped_reason = terminal_status
+            break
+
+    successful = counts["already_covered"] + counts["warmed"]
+    completed_all = len(details) == len(normalized_topics)
+    if successful == len(normalized_topics):
+        status = "success"
+    elif successful or counts["documents_ingested"]:
+        status = "partial"
+    else:
+        status = "failed"
+    report = {
+        "status": status,
+        "topics_total": len(normalized_topics),
+        "topics_processed": len(details),
+        "completed_all": completed_all,
+        **counts,
+        "stopped_reason": stopped_reason,
+        "topics": details,
+    }
+    audit_event(
+        "guideline_corpus_prewarm_completed",
+        status=status,
+        topics_total=report["topics_total"],
+        topics_processed=report["topics_processed"],
+        documents_ingested=report["documents_ingested"],
+        stopped_reason=stopped_reason,
+    )
+    return report
 
 
 def extract_sections(content: bytes, content_type: str) -> List[Tuple[str, str]]:

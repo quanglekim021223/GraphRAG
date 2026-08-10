@@ -9,6 +9,7 @@ from psycopg import sql
 
 from src.handlers.curated_guidelines import (
     CURATED_CORPUS_EMPTY,
+    DEFAULT_PREWARM_TOPICS,
     TRUSTED_OFFICIAL_STATUS,
     CuratedGuidelineStore,
     DocumentMetadata,
@@ -19,6 +20,7 @@ from src.handlers.curated_guidelines import (
     download_approved_document,
     extract_sections,
     ingest_guideline,
+    prewarm_guideline_corpus,
     retrieve_curated_guidelines,
     retrieve_guidelines_with_auto_ingest,
 )
@@ -190,6 +192,75 @@ class CuratedGuidelineTests(unittest.TestCase):
             embedding_model=self.embedder.model,
             downloaded_at=datetime(2026, 1, 3, tzinfo=timezone.utc),
         )
+
+    def test_prewarm_deduplicates_topics_and_reports_coverage(self):
+        calls = []
+
+        def retriever(question, **options):
+            calls.append((question, options))
+            if question == "Hypertension guideline":
+                return {"status": "success", "evidence": [{"id": "G1"}]}
+            if question == "Diabetes guideline":
+                return {
+                    "status": "success",
+                    "evidence": [{"id": "G1"}],
+                    "auto_ingest": {
+                        "status": "success",
+                        "ingested": [{"document_id": "doc-1"}],
+                    },
+                }
+            return {
+                "status": "not_found",
+                "auto_ingest": {"status": "not_found", "ingested": []},
+            }
+
+        result = prewarm_guideline_corpus(
+            topics=[
+                " Hypertension   guideline ",
+                "hypertension guideline",
+                "Diabetes guideline",
+                "Rare disease guideline",
+            ],
+            retrieval_options={"auto_ingest_enabled": False, "marker": "test"},
+            retriever=retriever,
+        )
+
+        self.assertEqual("partial", result["status"])
+        self.assertEqual(3, result["topics_total"])
+        self.assertEqual(1, result["already_covered"])
+        self.assertEqual(1, result["warmed"])
+        self.assertEqual(1, result["not_covered"])
+        self.assertEqual(1, result["documents_ingested"])
+        self.assertTrue(all(
+            options["auto_ingest_enabled"] for _topic, options in calls
+        ))
+
+    def test_prewarm_stops_after_terminal_discovery_failure(self):
+        calls = []
+
+        def retriever(question, **_options):
+            calls.append(question)
+            return {
+                "status": "corpus_empty",
+                "auto_ingest": {"status": "budget_exhausted", "ingested": []},
+            }
+
+        result = prewarm_guideline_corpus(
+            topics=["Topic one", "Topic two"],
+            retrieval_options={},
+            retriever=retriever,
+        )
+
+        self.assertEqual("failed", result["status"])
+        self.assertEqual(1, result["topics_processed"])
+        self.assertFalse(result["completed_all"])
+        self.assertEqual("budget_exhausted", result["stopped_reason"])
+        self.assertEqual(["Topic one"], calls)
+
+    def test_default_prewarm_taxonomy_is_bounded_and_deidentified(self):
+        self.assertEqual(10, len(DEFAULT_PREWARM_TOPICS))
+        self.assertEqual(len(DEFAULT_PREWARM_TOPICS), len(set(DEFAULT_PREWARM_TOPICS)))
+        self.assertTrue(all(topic.strip() for topic in DEFAULT_PREWARM_TOPICS))
 
     def test_html_extraction_keeps_section_boundary_and_drops_scripts(self):
         sections = extract_sections(

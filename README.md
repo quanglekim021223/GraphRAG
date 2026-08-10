@@ -333,6 +333,30 @@ content hash, score and deterministic source priority. These controls are
 in-memory per process; multi-worker production deployments must move shared
 cache/rate/budget/circuit state to Redis or an equivalent central store.
 
+### Prewarm common medical topics
+
+Run prewarming outside the user request path to reduce first-query latency. The
+command checks the PostgreSQL corpus first, so an already-covered topic does not
+call Tavily. A missing topic reuses the same strict discovery and ingestion
+pipeline as runtime:
+
+```bash
+# Use the built-in bounded taxonomy of 10 common medical topics.
+python3 -m scripts.curated_guidelines prewarm
+
+# Or warm only selected de-identified topics.
+python3 -m scripts.curated_guidelines prewarm \
+  --topic "Hypertension treatment clinical guideline" \
+  --topic "Diabetes management clinical guideline"
+```
+
+The report distinguishes `already_covered`, `warmed` and `not_covered`, records
+the number of documents ingested, and stops early on provider unavailability,
+rate limit, daily-budget exhaustion or an open circuit. The command can be run
+from cron or the deployment scheduler; the application does not start a hidden
+background scheduler. Long-tail corpus misses still use the synchronous runtime
+fallback and may therefore be slower on their first request.
+
 Manual ingestion remains available when organizational policy requires internal
 approval for an otherwise allowlisted official document:
 

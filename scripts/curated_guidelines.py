@@ -9,12 +9,14 @@ from psycopg_pool import PoolTimeout
 
 from src.config.settings import Config
 from src.handlers.curated_guidelines import (
+    DEFAULT_PREWARM_TOPICS,
     CuratedGuidelineStore,
     DocumentMetadata,
     EmbeddingProviderError,
     GuidelineIngestionError,
     OpenAIEmbedder,
     ingest_guideline,
+    prewarm_guideline_corpus,
 )
 from src.handlers.medical_guideline_search import search_medical_guidelines
 
@@ -34,6 +36,24 @@ def _metadata(args: argparse.Namespace) -> DocumentMetadata:
     )
 
 
+def _search_options(config: Config, actor_id: str) -> Dict[str, Any]:
+    return {
+        "min_score": config.medical_search_min_score,
+        "actor_id": actor_id,
+        "cache_ttl_seconds": config.medical_search_cache_ttl_seconds,
+        "rate_limit_per_minute": config.medical_search_rate_limit_per_minute,
+        "daily_budget": config.medical_search_daily_budget,
+        "max_retries": config.medical_search_max_retries,
+        "max_retry_delay_seconds": config.medical_search_max_retry_delay_seconds,
+        "circuit_failure_threshold": (
+            config.medical_search_circuit_failure_threshold
+        ),
+        "circuit_cooldown_seconds": (
+            config.medical_search_circuit_cooldown_seconds
+        ),
+    }
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Manage the reviewed medical-guideline corpus"
@@ -48,6 +68,17 @@ def _build_parser() -> argparse.ArgumentParser:
         "discover", help="Use Tavily only to identify review candidates"
     )
     discover.add_argument("question")
+
+    prewarm = subparsers.add_parser(
+        "prewarm",
+        help="Populate missing common topics through the trusted runtime pipeline",
+    )
+    prewarm.add_argument(
+        "--topic",
+        dest="topics",
+        action="append",
+        help="Custom de-identified topic; repeat for multiple topics",
+    )
 
     ingest = subparsers.add_parser(
         "ingest", help="Download and hash a candidate as pending_review"
@@ -94,19 +125,7 @@ def main() -> int:
                 question=args.question,
                 api_key=config.tavily_api_key,
                 max_results=config.medical_search_max_results,
-                min_score=config.medical_search_min_score,
-                actor_id="curated-ingestion-admin",
-                cache_ttl_seconds=config.medical_search_cache_ttl_seconds,
-                rate_limit_per_minute=config.medical_search_rate_limit_per_minute,
-                daily_budget=config.medical_search_daily_budget,
-                max_retries=config.medical_search_max_retries,
-                max_retry_delay_seconds=config.medical_search_max_retry_delay_seconds,
-                circuit_failure_threshold=(
-                    config.medical_search_circuit_failure_threshold
-                ),
-                circuit_cooldown_seconds=(
-                    config.medical_search_circuit_cooldown_seconds
-                ),
+                **_search_options(config, "curated-ingestion-admin"),
             )
             candidates: Dict[str, Any] = {
                 "status": result["status"],
@@ -116,7 +135,34 @@ def main() -> int:
             _print(candidates)
         else:
             store = CuratedGuidelineStore(postgres_uri)
-        if args.command == "ingest":
+        if args.command == "prewarm":
+            embedder = OpenAIEmbedder(
+                config.curated_embedding_endpoint,
+                config.github_token,
+                config.curated_embedding_model,
+            )
+            _print(prewarm_guideline_corpus(
+                topics=args.topics or DEFAULT_PREWARM_TOPICS,
+                retrieval_options={
+                    "postgres_uri": postgres_uri,
+                    "endpoint": config.curated_embedding_endpoint,
+                    "api_key": config.github_token,
+                    "embedding_model": config.curated_embedding_model,
+                    "tavily_api_key": config.tavily_api_key,
+                    "top_k": config.curated_retrieval_top_k,
+                    "min_score": config.curated_retrieval_min_score,
+                    "discovery_max_results": config.curated_discovery_max_results,
+                    "auto_ingest_max_documents": (
+                        config.curated_auto_ingest_max_documents
+                    ),
+                    "search_options": _search_options(
+                        config, "curated-prewarm-admin"
+                    ),
+                    "embedder": embedder,
+                    "store": store,
+                },
+            ))
+        elif args.command == "ingest":
             _print(ingest_guideline(
                 store,
                 args.url,

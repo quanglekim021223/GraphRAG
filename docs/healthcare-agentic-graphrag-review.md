@@ -505,6 +505,26 @@ Tavily nằm trong conditional runtime fallback khi local corpus miss và vẫn 
 admin command `discover`. Nó chỉ tìm URL; backend download full document rồi
 index vào PostgreSQL trước khi retry. Không có fallback ra ngoài whitelist.
 
+### Giảm cold-miss bằng warm corpus
+
+CLI `python3 -m scripts.curated_guidelines prewarm` chạy ngoài request path với
+taxonomy mặc định gồm 10 nhóm y khoa phổ biến. Mỗi topic đi qua chính pipeline
+corpus-first hiện có:
+
+```text
+topic de-identified
+→ corpus đã cover: không gọi Tavily
+→ corpus miss: discovery tối đa 5 URL
+→ validate/rank và ingest tối đa 3 documents
+→ persist sections + embeddings vào PostgreSQL
+```
+
+Có thể truyền nhiều `--topic` để prewarm theo nhu cầu thực tế. Command dừng sớm
+khi Tavily unavailable, rate-limited, hết daily budget hoặc circuit mở. Repo
+không tự khởi chạy scheduler; production có thể gọi command bằng cron hoặc
+deployment scheduler. Long-tail query chưa được warm vẫn đi qua synchronous
+cold-miss fallback, nên request đầu tiên của chủ đề đó có thể chậm.
+
 ### Giới hạn
 
 - Publication date của auto-ingestion phụ thuộc metadata Tavily; thiếu hoặc nằm
