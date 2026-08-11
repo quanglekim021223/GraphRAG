@@ -42,6 +42,10 @@ from src.helpers.logging_config import logger
 MAX_DOCUMENT_BYTES = 10_000_000
 MAX_SECTIONS_PER_DOCUMENT = 1000
 MAX_PREWARM_TOPICS = 20
+DEFAULT_CHUNK_MAX_TOKENS = 400
+DEFAULT_CHUNK_OVERLAP_TOKENS = 50
+DEFAULT_PARENT_CONTEXT_MAX_TOKENS = 1200
+DEFAULT_NEIGHBOR_WINDOW = 1
 TRUSTED_OFFICIAL_STATUS = "trusted_official"
 INTERNAL_APPROVED_STATUS = "approved"
 TRUSTED_OFFICIAL_ACTOR = "system:trusted-official-policy-v1"
@@ -122,6 +126,29 @@ class DocumentMetadata:
     version: str
     effective_from: str
     effective_until: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class ExtractedSection:
+    """One logical parent section recovered from a source document."""
+
+    heading: str
+    section_path: str
+    level: int
+    content: str
+
+
+@dataclass(frozen=True)
+class GuidelineChunk:
+    """One sentence-aware child chunk embedded for precise retrieval."""
+
+    parent_ordinal: int
+    chunk_index: int
+    heading: str
+    section_path: str
+    content: str
+    embedding_text: str
+    token_count: int
 
 
 class OpenAIEmbedder:
@@ -225,6 +252,21 @@ class CuratedGuidelineStore:
                 )
             """,
             """
+                CREATE TABLE IF NOT EXISTS guideline_parent_sections (
+                    parent_section_id TEXT PRIMARY KEY,
+                    document_id TEXT NOT NULL,
+                    ordinal INTEGER NOT NULL,
+                    heading TEXT NOT NULL,
+                    section_path TEXT NOT NULL,
+                    section_level INTEGER NOT NULL,
+                    content TEXT NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    FOREIGN KEY(document_id) REFERENCES guideline_documents(document_id)
+                        ON DELETE CASCADE,
+                    UNIQUE(document_id, ordinal)
+                )
+            """,
+            """
                 CREATE TABLE IF NOT EXISTS guideline_sections (
                     section_id TEXT PRIMARY KEY,
                     document_id TEXT NOT NULL,
@@ -239,10 +281,40 @@ class CuratedGuidelineStore:
                 )
             """,
             """
+                ALTER TABLE guideline_sections
+                ADD COLUMN IF NOT EXISTS parent_section_id TEXT
+                    REFERENCES guideline_parent_sections(parent_section_id)
+                    ON DELETE CASCADE
+            """,
+            """
+                ALTER TABLE guideline_sections
+                ADD COLUMN IF NOT EXISTS chunk_index INTEGER
+            """,
+            """
+                ALTER TABLE guideline_sections
+                ADD COLUMN IF NOT EXISTS section_path TEXT
+            """,
+            """
+                ALTER TABLE guideline_sections
+                ADD COLUMN IF NOT EXISTS token_count INTEGER
+            """,
+            """
+                ALTER TABLE guideline_sections
+                ADD COLUMN IF NOT EXISTS previous_section_id TEXT
+            """,
+            """
+                ALTER TABLE guideline_sections
+                ADD COLUMN IF NOT EXISTS next_section_id TEXT
+            """,
+            """
                 CREATE INDEX IF NOT EXISTS idx_guideline_effective
                 ON guideline_documents(
                     review_status, effective_status, effective_from, effective_until
                 )
+            """,
+            """
+                CREATE INDEX IF NOT EXISTS idx_guideline_child_position
+                ON guideline_sections(parent_section_id, chunk_index)
             """,
         )
         with self.pool.connection() as connection:
@@ -320,8 +392,8 @@ class CuratedGuidelineStore:
         expected_content_hash: str,
         embedder: Any,
         reviewed_at: Optional[datetime] = None,
-        max_chunk_chars: int = 2200,
-        chunk_overlap_chars: int = 200,
+        max_chunk_tokens: int = DEFAULT_CHUNK_MAX_TOKENS,
+        chunk_overlap_tokens: int = DEFAULT_CHUNK_OVERLAP_TOKENS,
     ) -> Dict[str, Any]:
         """Activate one hash after explicit internal review."""
         if not reviewer.strip():
@@ -333,8 +405,8 @@ class CuratedGuidelineStore:
             embedder=embedder,
             review_status=INTERNAL_APPROVED_STATUS,
             reviewed_at=reviewed_at,
-            max_chunk_chars=max_chunk_chars,
-            chunk_overlap_chars=chunk_overlap_chars,
+            max_chunk_tokens=max_chunk_tokens,
+            chunk_overlap_tokens=chunk_overlap_tokens,
         )
 
     def activate_trusted_official(
@@ -343,8 +415,8 @@ class CuratedGuidelineStore:
         expected_content_hash: str,
         embedder: Any,
         activated_at: Optional[datetime] = None,
-        max_chunk_chars: int = 2200,
-        chunk_overlap_chars: int = 200,
+        max_chunk_tokens: int = DEFAULT_CHUNK_MAX_TOKENS,
+        chunk_overlap_tokens: int = DEFAULT_CHUNK_OVERLAP_TOKENS,
     ) -> Dict[str, Any]:
         """Auto-activate only a document whose stored URLs remain allowlisted."""
         with self.pool.connection() as connection:
@@ -371,8 +443,8 @@ class CuratedGuidelineStore:
             embedder=embedder,
             review_status=TRUSTED_OFFICIAL_STATUS,
             reviewed_at=activated_at,
-            max_chunk_chars=max_chunk_chars,
-            chunk_overlap_chars=chunk_overlap_chars,
+            max_chunk_tokens=max_chunk_tokens,
+            chunk_overlap_tokens=chunk_overlap_tokens,
         )
 
     def _activate_document(
@@ -383,8 +455,8 @@ class CuratedGuidelineStore:
         embedder: Any,
         review_status: str,
         reviewed_at: Optional[datetime],
-        max_chunk_chars: int,
-        chunk_overlap_chars: int,
+        max_chunk_tokens: int,
+        chunk_overlap_tokens: int,
     ) -> Dict[str, Any]:
         """Extract, embed and activate one immutable pending document."""
         if review_status not in RETRIEVABLE_REVIEW_STATUSES:
@@ -407,25 +479,28 @@ class CuratedGuidelineStore:
                 "Activation embedder does not match the candidate embedding model"
             )
 
-        extracted = extract_sections(bytes(row["raw_content"]), row["content_type"])
-        sections = chunk_sections(
-            extracted, max_chunk_chars, chunk_overlap_chars
+        parents = extract_document_sections(
+            bytes(row["raw_content"]), row["content_type"]
         )
-        if not sections:
+        chunks = build_child_chunks(
+            parents,
+            document_title=row["title"],
+            max_tokens=max_chunk_tokens,
+            overlap_tokens=chunk_overlap_tokens,
+        )
+        if not chunks:
             raise GuidelineIngestionError("No usable full text was extracted")
-        if len(sections) > MAX_SECTIONS_PER_DOCUMENT:
+        if len(chunks) > MAX_SECTIONS_PER_DOCUMENT:
             raise GuidelineIngestionError(
                 "Document exceeds the section indexing limit"
             )
         try:
-            embeddings = embedder.embed(
-                [f"{heading}\n{content}" for heading, content in sections]
-            )
+            embeddings = embedder.embed([chunk.embedding_text for chunk in chunks])
         except EmbeddingProviderError as error:
             raise GuidelineIngestionError(
                 "Trusted document could not be embedded"
             ) from error
-        _validate_embedding_batch(sections, embeddings)
+        _validate_embedding_batch(chunks, embeddings)
         timestamp = (reviewed_at or datetime.now(timezone.utc)).astimezone(
             timezone.utc
         )
@@ -449,28 +524,78 @@ class CuratedGuidelineStore:
                 raise GuidelineIngestionError(
                     "Candidate changed state while approval was in progress"
                 )
-            for ordinal, ((heading, content), vector) in enumerate(
-                zip(sections, embeddings), start=1
+            parent_ids: Dict[int, str] = {}
+            for parent_ordinal, parent in enumerate(parents, start=1):
+                parent_hash = hashlib.sha256(
+                    parent.content.encode("utf-8")
+                ).hexdigest()
+                parent_id = hashlib.sha256(
+                    f"{document_id}|parent|{parent_ordinal}|{parent_hash}".encode(
+                        "utf-8"
+                    )
+                ).hexdigest()[:32]
+                parent_ids[parent_ordinal] = parent_id
+                connection.execute(
+                    """
+                    INSERT INTO guideline_parent_sections (
+                        parent_section_id, document_id, ordinal, heading,
+                        section_path, section_level, content, content_hash
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        parent_id,
+                        document_id,
+                        parent_ordinal,
+                        parent.heading,
+                        parent.section_path,
+                        parent.level,
+                        parent.content,
+                        parent_hash,
+                    ),
+                )
+
+            child_records = []
+            for ordinal, (chunk, vector) in enumerate(
+                zip(chunks, embeddings), start=1
             ):
-                section_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+                section_hash = hashlib.sha256(
+                    chunk.content.encode("utf-8")
+                ).hexdigest()
                 section_id = hashlib.sha256(
                     f"{document_id}|{ordinal}|{section_hash}".encode("utf-8")
                 ).hexdigest()[:32]
+                child_records.append((section_id, ordinal, chunk, section_hash, vector))
+
+            positions: Dict[Tuple[int, int], str] = {
+                (chunk.parent_ordinal, chunk.chunk_index): section_id
+                for section_id, _ordinal, chunk, _hash, _vector in child_records
+            }
+            for section_id, ordinal, chunk, section_hash, vector in child_records:
                 connection.execute(
                     """
                     INSERT INTO guideline_sections (
                         section_id, document_id, ordinal, heading, content,
-                        content_hash, embedding
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        content_hash, embedding, parent_section_id, chunk_index,
+                        section_path, token_count, previous_section_id,
+                        next_section_id
+                    ) VALUES (
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                    )
                     """,
                     (
                         section_id,
                         document_id,
                         ordinal,
-                        heading,
-                        content,
+                        chunk.heading,
+                        chunk.content,
                         section_hash,
                         list(vector),
+                        parent_ids[chunk.parent_ordinal],
+                        chunk.chunk_index,
+                        chunk.section_path,
+                        chunk.token_count,
+                        positions.get((chunk.parent_ordinal, chunk.chunk_index - 1)),
+                        positions.get((chunk.parent_ordinal, chunk.chunk_index + 1)),
                     ),
                 )
             connection.execute(
@@ -497,7 +622,8 @@ class CuratedGuidelineStore:
             document_id=document_id,
             review_status=review_status,
             actor_hash=hashlib.sha256(actor.encode("utf-8")).hexdigest(),
-            section_count=len(sections),
+            parent_section_count=len(parents),
+            section_count=len(chunks),
         )
         return self.get_document(document_id)
 
@@ -560,9 +686,12 @@ class CuratedGuidelineStore:
         with self.pool.connection() as connection:
             row = connection.execute(
                 """
-                SELECT d.*, COUNT(s.section_id) AS section_count
+                SELECT d.*, COUNT(DISTINCT s.section_id) AS section_count,
+                       COUNT(DISTINCT p.parent_section_id) AS parent_section_count
                 FROM guideline_documents d
                 LEFT JOIN guideline_sections s ON s.document_id = d.document_id
+                LEFT JOIN guideline_parent_sections p
+                    ON p.document_id = d.document_id
                 WHERE d.document_id = %s GROUP BY d.document_id
                 """,
                 (document_id,),
@@ -580,8 +709,9 @@ class CuratedGuidelineStore:
             sections = [
                 dict(row) for row in connection.execute(
                     """
-                    SELECT section_id, ordinal, heading, content, content_hash
-                    FROM guideline_sections WHERE document_id = %s
+                    SELECT parent_section_id AS section_id, ordinal, heading,
+                           section_path, section_level, content, content_hash
+                    FROM guideline_parent_sections WHERE document_id = %s
                     ORDER BY ordinal
                     """,
                     (document_id,),
@@ -595,20 +725,22 @@ class CuratedGuidelineStore:
                     """,
                     (document_id,),
                 ).fetchone()
-                preview = chunk_sections(
-                    extract_sections(bytes(raw["raw_content"]), raw["content_type"])
+                preview = extract_document_sections(
+                    bytes(raw["raw_content"]), raw["content_type"]
                 )
                 sections = [
                     {
                         "section_id": None,
                         "ordinal": ordinal,
-                        "heading": heading,
-                        "content": content,
+                        "heading": section.heading,
+                        "section_path": section.section_path,
+                        "section_level": section.level,
+                        "content": section.content,
                         "content_hash": hashlib.sha256(
-                            content.encode("utf-8")
+                            section.content.encode("utf-8")
                         ).hexdigest(),
                     }
-                    for ordinal, (heading, content) in enumerate(preview, start=1)
+                    for ordinal, section in enumerate(preview, start=1)
                 ]
         return {"document": document, "sections": sections}
 
@@ -653,20 +785,28 @@ class CuratedGuidelineStore:
         top_k: int,
         min_score: float,
         on_date: Optional[date] = None,
+        neighbor_window: int = DEFAULT_NEIGHBOR_WINDOW,
+        parent_context_max_tokens: int = DEFAULT_PARENT_CONTEXT_MAX_TOKENS,
     ) -> List[Dict[str, Any]]:
-        """Rank effective sections by cosine similarity in the small corpus."""
+        """Rank child chunks, then expand bounded parent or neighbor context."""
         today = on_date or date.today()
         with self.pool.connection() as connection:
             rows = connection.execute(
                 """
                 SELECT s.section_id, s.ordinal, s.heading, s.content,
                        s.content_hash AS section_hash, s.embedding,
+                       s.parent_section_id, s.chunk_index, s.section_path,
+                       s.token_count, s.previous_section_id, s.next_section_id,
+                       p.content AS parent_content,
+                       p.content_hash AS parent_section_hash,
                        d.document_id, d.title, d.publisher, d.publication_date,
                        d.version, d.effective_from, d.effective_until,
                        d.content_hash AS document_hash, d.final_url,
                        d.review_status, d.reviewed_at, d.reviewed_by
                 FROM guideline_sections s
                 JOIN guideline_documents d ON d.document_id = s.document_id
+                LEFT JOIN guideline_parent_sections p
+                    ON p.parent_section_id = s.parent_section_id
                 WHERE d.review_status IN ('approved', 'trusted_official')
                   AND d.effective_status = 'active'
                   AND d.embedding_model = %s AND d.effective_from <= %s
@@ -686,7 +826,23 @@ class CuratedGuidelineStore:
             item["score"] = score
             ranked.append(item)
         ranked.sort(key=lambda item: (-item["score"], item["section_id"]))
-        return ranked[:max(1, min(int(top_k), 10))]
+        limit = max(1, min(int(top_k), 10))
+        selected = []
+        seen_parents = set()
+        for item in ranked:
+            parent_key = item.get("parent_section_id") or item["section_id"]
+            if parent_key in seen_parents:
+                continue
+            selected.append(item)
+            seen_parents.add(parent_key)
+            if len(selected) >= limit:
+                break
+        safe_window = max(0, min(int(neighbor_window), 2))
+        safe_parent_tokens = max(200, int(parent_context_max_tokens))
+        return [
+            _expand_match_context(item, rows, safe_window, safe_parent_tokens)
+            for item in selected
+        ]
 
 
 @lru_cache(maxsize=4)
@@ -907,7 +1063,7 @@ def retrieve_curated_guidelines(
     on_date: Optional[date] = None,
     store: Optional[CuratedGuidelineStore] = None,
 ) -> Dict[str, Any]:
-    """Return only effective section text with versioned, section-level citations."""
+    """Retrieve child chunks and return bounded parent/neighbor evidence."""
     if contains_sensitive_patient_data(question):
         audit_event("curated_guideline_rejected_sensitive_input", level="warning")
         return {"status": "privacy_denied", "response": SENSITIVE_SEARCH_REFUSAL}
@@ -958,12 +1114,13 @@ def retrieve_curated_guidelines(
         )
         lines.extend([
             "",
-            f'[{evidence_id}] {match["title"]} — {match["heading"]}',
+            f'[{evidence_id}] {match["title"]} — {match["section_path"]}',
             match["content"],
             (
                 f'Nguồn: {match["final_url"]} | Phiên bản: {match["version"]} '
                 f'| Công bố: {match["publication_date"]} '
-                f'| Mức tin cậy: {trust_label}'
+                f'| Mức tin cậy: {trust_label} '
+                f'| Context: {match["context_mode"]}'
             ),
         ])
         evidence.append({"id": evidence_id, "retrieved_at": retrieved_at, **match})
@@ -1171,8 +1328,10 @@ def prewarm_guideline_corpus(
     return report
 
 
-def extract_sections(content: bytes, content_type: str) -> List[Tuple[str, str]]:
-    """Extract full text while retaining an auditable section or page boundary."""
+def extract_document_sections(
+    content: bytes, content_type: str
+) -> List[ExtractedSection]:
+    """Extract logical parent sections with hierarchy where the format exposes it."""
     normalized_type = content_type.split(";", 1)[0].strip().lower()
     if normalized_type in {"text/html", "application/xhtml+xml"}:
         parser = _SectionHTMLParser()
@@ -1181,7 +1340,7 @@ def extract_sections(content: bytes, content_type: str) -> List[Tuple[str, str]]
         return parser.sections
     if normalized_type == "text/plain":
         text = content.decode("utf-8", errors="replace")
-        return [("Toàn văn", _normalize_extracted_text(text))]
+        return _extract_plain_text_sections(text)
     if normalized_type == "application/pdf":
         try:
             from pypdf import PdfReader  # pylint: disable=import-outside-toplevel
@@ -1191,52 +1350,98 @@ def extract_sections(content: bytes, content_type: str) -> List[Tuple[str, str]]
             ) from error
         try:
             reader = PdfReader(BytesIO(content))
-            return _extract_pdf_sections(reader)
+            return _extract_pdf_document_sections(reader)
         except Exception as error:  # pypdf exposes multiple parser exceptions
             raise GuidelineIngestionError("PDF full-text extraction failed") from error
     raise GuidelineIngestionError(f"Unsupported content type: {normalized_type}")
 
 
-def chunk_sections(
-    sections: Iterable[Tuple[str, str]],
-    max_chars: int = 2200,
-    overlap_chars: int = 200,
-) -> List[Tuple[str, str]]:
-    """Split inside each section only; never merge unrelated headings."""
-    if max_chars < 200 or overlap_chars < 0 or overlap_chars >= max_chars:
-        raise GuidelineIngestionError("Invalid section chunk settings")
-    chunks = []
-    for heading, raw_text in sections:
-        text = _normalize_extracted_text(raw_text)
+def extract_sections(content: bytes, content_type: str) -> List[Tuple[str, str]]:
+    """Compatibility view returning ``(section_path, content)`` tuples."""
+    return [
+        (section.section_path, section.content)
+        for section in extract_document_sections(content, content_type)
+    ]
+
+
+def build_child_chunks(
+    sections: Iterable[ExtractedSection],
+    document_title: str,
+    max_tokens: int = DEFAULT_CHUNK_MAX_TOKENS,
+    overlap_tokens: int = DEFAULT_CHUNK_OVERLAP_TOKENS,
+) -> List[GuidelineChunk]:
+    """Create sentence-aware child chunks without crossing parent boundaries."""
+    if max_tokens < 64 or overlap_tokens < 0 or overlap_tokens >= max_tokens // 2:
+        raise GuidelineIngestionError("Invalid token chunk settings")
+
+    chunks: List[GuidelineChunk] = []
+    for parent_ordinal, section in enumerate(sections, start=1):
+        text = _normalize_extracted_text(section.content)
         if not text:
             continue
-        start = 0
-        part = 1
-        while start < len(text):
-            end = min(len(text), start + max_chars)
-            if end < len(text):
-                boundary = max(
-                    text.rfind("\n\n", start + max_chars // 2, end),
-                    text.rfind(". ", start + max_chars // 2, end),
-                )
-                if boundary > start:
-                    end = boundary + (2 if text[boundary:boundary + 2] == ". " else 0)
-            chunk = text[start:end].strip()
-            if chunk:
-                label = heading if start == 0 and end == len(text) else f"{heading} ({part})"
-                chunks.append((label[:300], chunk))
-            if end >= len(text):
-                break
-            next_start = max(start + 1, end - overlap_chars)
-            while next_start < end and not text[next_start].isspace():
-                next_start += 1
-            start = next_start
-            part += 1
+        header = _truncate_to_tokens(
+            f"Document: {document_title}\nSection: {section.section_path}",
+            max(32, max_tokens // 3),
+        )
+        content_budget = max_tokens - _count_tokens(f"{header}\n\n")
+        if content_budget < 32:
+            raise GuidelineIngestionError("Document metadata exceeds chunk budget")
+        units = _sentence_units(text, content_budget)
+        packed = _pack_sentence_units(units, content_budget, overlap_tokens)
+        for chunk_index, chunk_text in enumerate(packed):
+            embedding_text = f"{header}\n\n{chunk_text}"
+            chunks.append(GuidelineChunk(
+                parent_ordinal=parent_ordinal,
+                chunk_index=chunk_index,
+                heading=(
+                    section.heading
+                    if len(packed) == 1
+                    else f"{section.heading} ({chunk_index + 1})"
+                )[:300],
+                section_path=section.section_path[:1000],
+                content=chunk_text,
+                embedding_text=embedding_text,
+                token_count=_count_tokens(embedding_text),
+            ))
     return chunks
 
 
+def chunk_sections(
+    sections: Iterable[Tuple[str, str]],
+    max_tokens: int = DEFAULT_CHUNK_MAX_TOKENS,
+    overlap_tokens: int = DEFAULT_CHUNK_OVERLAP_TOKENS,
+    **legacy_settings: Any,
+) -> List[Tuple[str, str]]:
+    """Compatibility wrapper around token-aware child chunking.
+
+    ``max_chars`` and ``overlap_chars`` remain accepted for older callers and
+    are conservatively converted to token budgets.
+    """
+    max_chars = legacy_settings.pop("max_chars", None)
+    overlap_chars = legacy_settings.pop("overlap_chars", None)
+    if legacy_settings:
+        raise TypeError(f"Unknown chunk settings: {', '.join(legacy_settings)}")
+    if max_chars is not None:
+        max_tokens = max(64, int(max_chars) // 4)
+    if overlap_chars is not None:
+        overlap_tokens = max(0, int(overlap_chars) // 4)
+    extracted = [
+        ExtractedSection(str(heading), str(heading), 1, str(content))
+        for heading, content in sections
+    ]
+    return [
+        (chunk.heading, chunk.content)
+        for chunk in build_child_chunks(
+            extracted,
+            document_title="Guideline",
+            max_tokens=max_tokens,
+            overlap_tokens=overlap_tokens,
+        )
+    ]
+
+
 class _SectionHTMLParser(HTMLParser):
-    """Small HTML extractor that groups visible text under h1-h6 headings."""
+    """Group visible HTML text under an h1-h6 hierarchy."""
 
     SKIP_TAGS = {"script", "style", "nav", "footer", "form", "svg", "noscript"}
     BREAK_TAGS = {
@@ -1245,8 +1450,11 @@ class _SectionHTMLParser(HTMLParser):
 
     def __init__(self):
         super().__init__(convert_charrefs=True)
-        self.sections: List[Tuple[str, str]] = []
+        self.sections: List[ExtractedSection] = []
         self._heading = "Tổng quan"
+        self._section_path = "Tổng quan"
+        self._heading_level = 1
+        self._heading_stack: List[str] = []
         self._heading_buffer: List[str] = []
         self._text_buffer: List[str] = []
         self._heading_tag: Optional[str] = None
@@ -1262,6 +1470,7 @@ class _SectionHTMLParser(HTMLParser):
         if re.fullmatch(r"h[1-6]", tag):
             self._flush_section()
             self._heading_tag = tag
+            self._heading_level = int(tag[1])
             self._heading_buffer = []
         elif tag in self.BREAK_TAGS:
             self._text_buffer.append("\n")
@@ -1277,6 +1486,14 @@ class _SectionHTMLParser(HTMLParser):
             heading = _normalize_extracted_text(" ".join(self._heading_buffer))
             if heading:
                 self._heading = heading
+                level = self._heading_level
+                self._heading_stack = self._heading_stack[:level - 1]
+                while len(self._heading_stack) < level - 1:
+                    self._heading_stack.append("")
+                self._heading_stack.append(heading)
+                self._section_path = " > ".join(
+                    item for item in self._heading_stack if item
+                )
             self._heading_tag = None
         elif tag in self.BREAK_TAGS:
             self._text_buffer.append("\n")
@@ -1296,7 +1513,12 @@ class _SectionHTMLParser(HTMLParser):
     def _flush_section(self):
         text = _normalize_extracted_text(" ".join(self._text_buffer))
         if text:
-            self.sections.append((self._heading[:300], text))
+            self.sections.append(ExtractedSection(
+                heading=self._heading[:300],
+                section_path=self._section_path[:1000],
+                level=self._heading_level,
+                content=text,
+            ))
         self._text_buffer = []
 
 
@@ -1307,36 +1529,370 @@ def _normalize_extracted_text(text: str) -> str:
 
 
 def _extract_pdf_sections(reader: Any) -> List[Tuple[str, str]]:
-    """Use PDF outline headings when present, otherwise retain page boundaries."""
-    headings: Dict[int, str] = {}
-    stack = list(reversed(getattr(reader, "outline", []) or []))
-    visited = 0
-    while stack and visited < 1000:
-        item = stack.pop()
-        visited += 1
-        if isinstance(item, list):
-            stack.extend(reversed(item))
-            continue
-        title = _normalize_extracted_text(str(getattr(item, "title", "")))
-        if not title:
-            continue
-        try:
-            page_number = int(reader.get_destination_page_number(item))
-        except (AttributeError, TypeError, ValueError):
-            continue
-        headings.setdefault(page_number, title[:300])
+    """Compatibility view of PDF parent sections."""
+    return [
+        (section.heading, section.content)
+        for section in _extract_pdf_document_sections(reader)
+    ]
 
-    sections = []
-    current_heading = ""
+
+def _extract_pdf_document_sections(reader: Any) -> List[ExtractedSection]:
+    """Prefer PDF outline hierarchy, then font/layout cues, then page fallback."""
+    headings = _pdf_outline_headings(reader)
+    sections: List[ExtractedSection] = []
+    current_path: Tuple[str, ...] = ()
     for page_number, page in enumerate(reader.pages):
-        current_heading = headings.get(page_number, current_heading)
+        current_path = headings.get(page_number, current_path)
         text = _normalize_extracted_text(page.extract_text() or "")
-        if text:
-            sections.append((
-                current_heading or f"Trang {page_number + 1}",
-                text,
+        if not text:
+            continue
+        if current_path:
+            sections.append(ExtractedSection(
+                heading=current_path[-1][:300],
+                section_path=" > ".join(current_path)[:1000],
+                level=len(current_path),
+                content=text,
             ))
+            continue
+        layout_sections = _extract_pdf_layout_sections(page, page_number)
+        sections.extend(layout_sections or [ExtractedSection(
+            heading=f"Trang {page_number + 1}",
+            section_path=f"Trang {page_number + 1}",
+            level=1,
+            content=text,
+        )])
+    return _merge_adjacent_sections(sections)
+
+
+def _extract_plain_text_sections(text: str) -> List[ExtractedSection]:
+    """Recover only conservative Markdown/numbered/plain-text headings."""
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    lines = normalized.split("\n")
+    sections: List[ExtractedSection] = []
+    stack: List[str] = []
+    heading = "Toàn văn"
+    path = heading
+    level = 1
+    buffer: List[str] = []
+
+    def flush() -> None:
+        content = _normalize_extracted_text("\n".join(buffer))
+        if content:
+            sections.append(ExtractedSection(
+                heading=heading[:300],
+                section_path=path[:1000],
+                level=level,
+                content=content,
+            ))
+        buffer.clear()
+
+    for index, raw_line in enumerate(lines):
+        candidate = raw_line.strip()
+        detected = _plain_heading(candidate, lines, index)
+        if detected is None:
+            buffer.append(raw_line)
+            continue
+        flush()
+        heading, level = detected
+        stack = stack[:level - 1]
+        while len(stack) < level - 1:
+            stack.append("")
+        stack.append(heading)
+        path = " > ".join(item for item in stack if item)
+    flush()
+    if sections:
+        return sections
+    content = _normalize_extracted_text(text)
+    return [ExtractedSection("Toàn văn", "Toàn văn", 1, content)] if content else []
+
+
+def _plain_heading(
+    line: str, all_lines: Sequence[str], index: int
+) -> Optional[Tuple[str, int]]:
+    if not line or len(line) > 120:
+        return None
+    markdown = re.fullmatch(r"(#{1,6})\s+(.+?)\s*#*", line)
+    if markdown:
+        return markdown.group(2).strip(), len(markdown.group(1))
+    numbered = re.fullmatch(r"(\d+(?:\.\d+)*\.?|[A-Z]\.)\s+(.+)", line)
+    if numbered:
+        numeric = numbered.group(1)
+        level = len(re.findall(r"\d+", numeric)) if numeric[0].isdigit() else 1
+        return f"{numeric} {numbered.group(2)}", max(1, min(level, 6))
+
+    previous_blank = index == 0 or not all_lines[index - 1].strip()
+    next_blank = index + 1 >= len(all_lines) or not all_lines[index + 1].strip()
+    letters = "".join(character for character in line if character.isalpha())
+    uppercase = len(letters) >= 4 and letters == letters.upper()
+    short_colon = line.endswith(":") and len(line.split()) <= 10
+    if previous_blank and (uppercase or short_colon) and (next_blank or index + 1 < len(all_lines)):
+        return line.rstrip(":"), 1
+    return None
+
+
+def _pdf_outline_headings(reader: Any) -> Dict[int, Tuple[str, ...]]:
+    headings: Dict[int, Tuple[str, ...]] = {}
+    visited = 0
+
+    def walk(items: Sequence[Any], parent: Tuple[str, ...] = ()) -> None:
+        nonlocal visited
+        previous_path = parent
+        for item in items:
+            if visited >= 1000:
+                return
+            if isinstance(item, list):
+                walk(item, previous_path)
+                continue
+            visited += 1
+            title = _normalize_extracted_text(str(getattr(item, "title", "")))
+            if not title:
+                continue
+            path = (*parent, title[:300])
+            previous_path = path
+            try:
+                page_number = int(reader.get_destination_page_number(item))
+            except (AttributeError, TypeError, ValueError):
+                continue
+            headings.setdefault(page_number, path)
+
+    walk(getattr(reader, "outline", []) or [])
+    return headings
+
+
+def _extract_pdf_layout_sections(
+    page: Any, page_number: int
+) -> List[ExtractedSection]:
+    """Best-effort heading detection using pypdf font callbacks."""
+    spans: List[Tuple[str, float, bool]] = []
+
+    def visitor(
+        text: str,
+        _cm: Any,
+        _tm: Any,
+        font: Optional[Dict[str, Any]],
+        font_size: float,
+    ) -> None:
+        font_name = str((font or {}).get("/BaseFont", "")).casefold()
+        bold = "bold" in font_name or "black" in font_name
+        for line in str(text).splitlines():
+            clean = _normalize_extracted_text(line)
+            if clean:
+                spans.append((clean, float(font_size or 0), bold))
+
+    try:
+        page.extract_text(visitor_text=visitor)
+    except (TypeError, AttributeError, ValueError):
+        return []
+    if len(spans) < 2:
+        return []
+    sizes = sorted(size for _text, size, _bold in spans if size > 0)
+    if not sizes:
+        return []
+    median = sizes[len(sizes) // 2]
+    candidates = []
+    for index, (text, size, bold) in enumerate(spans):
+        heading_like = (
+            len(text) <= 120
+            and len(text.split()) <= 14
+            and not re.search(r"[.!?]$", text)
+            and (size >= median * 1.18 or (bold and size >= median))
+        )
+        if heading_like:
+            candidates.append(index)
+    if not candidates:
+        return []
+
+    sections: List[ExtractedSection] = []
+    preamble = _normalize_extracted_text("\n".join(
+        span[0] for span in spans[:candidates[0]]
+    ))
+    if preamble:
+        page_heading = f"Trang {page_number + 1}"
+        sections.append(ExtractedSection(
+            heading=page_heading,
+            section_path=page_heading,
+            level=1,
+            content=preamble,
+        ))
+    heading_stack: List[str] = []
+    for offset, start in enumerate(candidates):
+        end = candidates[offset + 1] if offset + 1 < len(candidates) else len(spans)
+        heading, size, _bold = spans[start]
+        content = _normalize_extracted_text("\n".join(
+            span[0] for span in spans[start + 1:end]
+        ))
+        if not content:
+            continue
+        level = 1 if size >= max(sizes) * 0.95 else 2
+        heading_stack = heading_stack[:level - 1]
+        while len(heading_stack) < level - 1:
+            heading_stack.append("")
+        heading_stack.append(heading)
+        sections.append(ExtractedSection(
+            heading=heading[:300],
+            section_path=" > ".join(
+                item for item in heading_stack if item
+            )[:1000],
+            level=level,
+            content=content,
+        ))
     return sections
+
+
+@lru_cache(maxsize=1)
+def _token_encoder() -> Any:
+    try:
+        import tiktoken  # pylint: disable=import-outside-toplevel
+        return tiktoken.get_encoding("cl100k_base")
+    except Exception as error:  # cache bootstrap can fail in restricted runtimes
+        logger.warning(
+            "Exact tokenizer unavailable; using local lexical fallback: %s",
+            type(error).__name__,
+        )
+        return _LexicalTokenEncoder()
+
+
+class _LexicalTokenEncoder:
+    """Offline fallback; exact model tokenization resumes when cache is present."""
+
+    _PATTERN = re.compile(r"\w+|[^\w\s]", re.UNICODE)
+
+    def encode(self, text: str) -> List[str]:
+        return self._PATTERN.findall(text)
+
+    @staticmethod
+    def decode(tokens: Sequence[str]) -> str:
+        text = ""
+        no_leading_space = set(".,;:!?%)]}。！？")
+        for token in tokens:
+            if not text or token in no_leading_space:
+                text += token
+            else:
+                text += f" {token}"
+        return text
+
+
+def _count_tokens(text: str) -> int:
+    return len(_token_encoder().encode(text))
+
+
+def _truncate_to_tokens(text: str, limit: int) -> str:
+    tokens = _token_encoder().encode(text)
+    return text if len(tokens) <= limit else _token_encoder().decode(tokens[:limit])
+
+
+def _sentence_units(text: str, token_budget: int) -> List[str]:
+    sentences = [
+        item.strip()
+        for item in re.split(r"(?<=[.!?。！？])\s+|\n+", text)
+        if item.strip()
+    ]
+    units: List[str] = []
+    for sentence in sentences:
+        if _count_tokens(sentence) <= token_budget:
+            units.append(sentence)
+            continue
+        clauses = [
+            item.strip()
+            for item in re.split(r"(?<=[;:])\s+|(?<=,)\s+", sentence)
+            if item.strip()
+        ]
+        for clause in clauses:
+            if _count_tokens(clause) <= token_budget:
+                units.append(clause)
+                continue
+            tokens = _token_encoder().encode(clause)
+            step = max(1, token_budget - min(20, token_budget // 10))
+            for start in range(0, len(tokens), step):
+                piece = _token_encoder().decode(tokens[start:start + token_budget]).strip()
+                if piece:
+                    units.append(piece)
+                if start + token_budget >= len(tokens):
+                    break
+    return units
+
+
+def _pack_sentence_units(
+    units: Sequence[str], token_budget: int, overlap_tokens: int
+) -> List[str]:
+    packed: List[str] = []
+    current: List[str] = []
+    for unit in units:
+        candidate = " ".join((*current, unit))
+        if current and _count_tokens(candidate) > token_budget:
+            packed.append(" ".join(current))
+            overlap: List[str] = []
+            overlap_count = 0
+            for previous in reversed(current):
+                previous_tokens = _count_tokens(previous)
+                if overlap_count + previous_tokens > overlap_tokens:
+                    break
+                overlap.insert(0, previous)
+                overlap_count += previous_tokens
+            current = overlap
+            while current and _count_tokens(" ".join((*current, unit))) > token_budget:
+                current.pop(0)
+        current.append(unit)
+    if current:
+        packed.append(" ".join(current))
+    return packed
+
+
+def _expand_match_context(
+    match: Dict[str, Any],
+    all_rows: Sequence[Dict[str, Any]],
+    neighbor_window: int,
+    parent_context_max_tokens: int,
+) -> Dict[str, Any]:
+    result = dict(match)
+    result["matched_content"] = result["content"]
+    result["section_path"] = result.get("section_path") or result["heading"]
+    parent_content = result.get("parent_content") or ""
+    if parent_content and _count_tokens(parent_content) <= parent_context_max_tokens:
+        result["content"] = parent_content
+        result["context_mode"] = "parent"
+        result["context_section_ids"] = [result["section_id"]]
+        return result
+
+    parent_id = result.get("parent_section_id")
+    chunk_index = result.get("chunk_index")
+    if parent_id is None or chunk_index is None or neighbor_window == 0:
+        result["context_mode"] = "child"
+        result["context_section_ids"] = [result["section_id"]]
+        return result
+    neighbors = sorted(
+        (
+            row for row in all_rows
+            if row.get("parent_section_id") == parent_id
+            and row.get("chunk_index") is not None
+            and abs(int(row["chunk_index"]) - int(chunk_index)) <= neighbor_window
+        ),
+        key=lambda row: int(row["chunk_index"]),
+    )
+    result["content"] = "\n\n".join(str(row["content"]) for row in neighbors)
+    result["context_mode"] = "neighbors" if len(neighbors) > 1 else "child"
+    result["context_section_ids"] = [row["section_id"] for row in neighbors]
+    return result
+
+
+def _merge_adjacent_sections(
+    sections: Sequence[ExtractedSection],
+) -> List[ExtractedSection]:
+    merged: List[ExtractedSection] = []
+    for section in sections:
+        if merged and merged[-1].section_path == section.section_path:
+            previous = merged[-1]
+            merged[-1] = ExtractedSection(
+                heading=previous.heading,
+                section_path=previous.section_path,
+                level=previous.level,
+                content=_normalize_extracted_text(
+                    f"{previous.content}\n\n{section.content}"
+                ),
+            )
+        else:
+            merged.append(section)
+    return merged
 
 
 def _validate_metadata(metadata: DocumentMetadata) -> None:
@@ -1396,7 +1952,7 @@ def _constant_time_equal(left: str, right: str) -> bool:
 
 
 def _validate_embedding_batch(
-    sections: Sequence[Tuple[str, str]],
+    sections: Sequence[GuidelineChunk],
     embeddings: Sequence[Sequence[float]],
 ) -> None:
     if len(sections) != len(embeddings) or not sections:

@@ -14,11 +14,15 @@ from src.handlers.curated_guidelines import (
     CuratedGuidelineStore,
     DocumentMetadata,
     DownloadedDocument,
+    ExtractedSection,
     GuidelineIngestionError,
+    _extract_pdf_document_sections,
     _extract_pdf_sections,
+    build_child_chunks,
     chunk_sections,
     download_approved_document,
     extract_sections,
+    extract_document_sections,
     ingest_guideline,
     prewarm_guideline_corpus,
     retrieve_curated_guidelines,
@@ -275,14 +279,52 @@ class CuratedGuidelineTests(unittest.TestCase):
 
         self.assertEqual("Hypertension", sections[0][0])
         self.assertIn("cardiovascular risk", sections[0][1])
-        self.assertEqual("Exceptions", sections[1][0])
+        self.assertEqual("Hypertension > Exceptions", sections[1][0])
         self.assertNotIn("malicious", str(sections))
+
+    def test_html_extraction_preserves_heading_hierarchy(self):
+        sections = extract_document_sections(
+            b"""
+            <h1>Diabetes</h1><p>Overview.</p>
+            <h2>Treatment</h2><p>Use treatment.</p>
+            <h3>Contraindications</h3><p>Avoid when unsafe.</p>
+            """,
+            "text/html",
+        )
+
+        self.assertEqual("Diabetes", sections[0].section_path)
+        self.assertEqual("Diabetes > Treatment", sections[1].section_path)
+        self.assertEqual(
+            "Diabetes > Treatment > Contraindications",
+            sections[2].section_path,
+        )
+
+    def test_plain_text_uses_conservative_heading_hierarchy(self):
+        sections = extract_document_sections(
+            b"# Diabetes\nOverview.\n\n## Treatment\nUse treatment.\n",
+            "text/plain",
+        )
+
+        self.assertEqual("Diabetes", sections[0].section_path)
+        self.assertEqual("Diabetes > Treatment", sections[1].section_path)
+
+        numbered = extract_document_sections(
+            b"1 Overview\nGeneral guidance.\n\n1.1 Treatment\nUse treatment.\n",
+            "text/plain",
+        )
+        self.assertEqual("1 Overview", numbered[0].section_path)
+        self.assertEqual("1 Overview > 1.1 Treatment", numbered[1].section_path)
 
     def test_pdf_outline_is_preserved_as_section_heading(self):
         sections = _extract_pdf_sections(_FakePdfReader())
+        structured = _extract_pdf_document_sections(_FakePdfReader())
 
         self.assertEqual("Recommendations", sections[0][0])
         self.assertEqual("Contraindications", sections[1][0])
+        self.assertEqual(
+            "Recommendations > Contraindications",
+            structured[1].section_path,
+        )
 
     def test_controlled_download_uses_validated_final_url_and_content_type(self):
         html = b"<h1>Approved guideline</h1><p>Full text</p>"
@@ -335,6 +377,50 @@ class CuratedGuidelineTests(unittest.TestCase):
             for _heading, text in chunks
         ))
 
+    def test_child_chunking_prepends_title_and_path_with_token_budget(self):
+        sections = [ExtractedSection(
+            heading="Contraindications",
+            section_path="Diabetes > Treatment > Contraindications",
+            level=3,
+            content=(
+                "First complete recommendation is retained. "
+                "Second complete recommendation is retained. " * 20
+            ),
+        )]
+
+        chunks = build_child_chunks(
+            sections,
+            document_title="Clinical Guideline",
+            max_tokens=96,
+            overlap_tokens=8,
+        )
+
+        self.assertGreater(len(chunks), 1)
+        self.assertTrue(all(chunk.token_count <= 96 for chunk in chunks))
+        self.assertTrue(all(
+            chunk.embedding_text.startswith(
+                "Document: Clinical Guideline\n"
+                "Section: Diabetes > Treatment > Contraindications"
+            )
+            for chunk in chunks
+        ))
+
+    def test_single_oversized_sentence_is_hard_split_within_budget(self):
+        chunks = build_child_chunks(
+            [ExtractedSection(
+                heading="Long sentence",
+                section_path="Long sentence",
+                level=1,
+                content="word " * 300,
+            )],
+            document_title="Guideline",
+            max_tokens=80,
+            overlap_tokens=5,
+        )
+
+        self.assertGreater(len(chunks), 1)
+        self.assertTrue(all(chunk.token_count <= 80 for chunk in chunks))
+
     def test_ingestion_is_pending_until_reviewed_hash_is_approved(self):
         self._require_store()
         html = (
@@ -385,6 +471,21 @@ class CuratedGuidelineTests(unittest.TestCase):
         )
         self.assertEqual("approved", approved["review_status"])
         self.assertEqual("active", approved["effective_status"])
+        self.assertEqual(1, approved["parent_section_count"])
+        with self.store.pool.connection() as connection:
+            relation = connection.execute(
+                """
+                SELECT p.section_path, s.chunk_index, s.token_count
+                FROM guideline_sections s
+                JOIN guideline_parent_sections p
+                  ON p.parent_section_id = s.parent_section_id
+                WHERE s.document_id = %s
+                """,
+                (document["document_id"],),
+            ).fetchone()
+        self.assertEqual("Blood pressure treatment", relation["section_path"])
+        self.assertEqual(0, relation["chunk_index"])
+        self.assertGreater(relation["token_count"], 0)
 
         result = retrieve_curated_guidelines(
             "Hướng dẫn tăng huyết áp",
@@ -405,6 +506,7 @@ class CuratedGuidelineTests(unittest.TestCase):
         self.assertIn("Phiên bản: 2026.1", result["response"])
         self.assertEqual(document["content_hash"], result["evidence"][0]["document_hash"])
         self.assertEqual(64, len(result["evidence"][0]["section_hash"]))
+        self.assertEqual("parent", result["evidence"][0]["context_mode"])
 
     def test_approving_new_version_supersedes_old_version(self):
         first = self._add_pending("2026.1", b"first")
@@ -427,6 +529,47 @@ class CuratedGuidelineTests(unittest.TestCase):
         )
         self.assertTrue(matches)
         self.assertTrue(all(item["version"] == "2026.2" for item in matches))
+
+    def test_retrieval_expands_neighbor_chunks_for_large_parent(self):
+        self._require_store()
+        content = " ".join(
+            f"Clinical recommendation number {index} is retained."
+            for index in range(80)
+        )
+        document = self.store.add_pending_document(
+            _downloaded(
+                f"<h1>Long recommendations</h1><p>{content}</p>".encode()
+            ),
+            _metadata(),
+            self.embedder.model,
+        )
+        approved = self.store.approve(
+            document["document_id"],
+            "reviewer",
+            document["content_hash"],
+            self.embedder,
+            max_chunk_tokens=80,
+            chunk_overlap_tokens=5,
+        )
+
+        self.assertGreater(approved["section_count"], 2)
+        matches = self.store.search(
+            [1.0, 0.0],
+            self.embedder.model,
+            top_k=1,
+            min_score=0.0,
+            on_date=date(2026, 1, 10),
+            neighbor_window=1,
+            parent_context_max_tokens=200,
+        )
+
+        self.assertEqual("neighbors", matches[0]["context_mode"])
+        self.assertIn(len(matches[0]["context_section_ids"]), {2, 3})
+        self.assertIn(matches[0]["section_id"], matches[0]["context_section_ids"])
+        self.assertTrue(
+            matches[0]["previous_section_id"]
+            or matches[0]["next_section_id"]
+        )
 
     def test_corpus_miss_auto_ingests_full_trusted_official_document(self):
         self._require_store()

@@ -23,6 +23,7 @@ langsmith>=0.0.60
 python-dotenv>=1.0.0
 nest-asyncio>=1.5.8
 pypdf>=5.0.0
+tiktoken>=0.7.0
 
 # Logging và monitoring
 python-logging-loki>=0.3.1

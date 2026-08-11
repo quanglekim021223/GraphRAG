@@ -291,9 +291,12 @@ medical_guideline_tool
 → validate candidates and ingest at most 3 full documents
 → controlled full-document download (never store the snippet)
 → validate final URL + publication date + content type + hash
-→ extract, section-chunk, embed and auto-activate as trusted_official
-→ retry local retrieval and return the top 3 relevant sections
-→ return extractive section text with [G1], [G2] citations
+→ parse document hierarchy into parent sections
+→ create sentence-aware child chunks (400-token target, 50-token overlap)
+→ prepend document title + section path and embed child chunks
+→ persist parent/child/position metadata and auto-activate as trusted_official
+→ retrieve top 3 child chunks and expand a bounded parent or ±1 neighbor context
+→ return extractive section evidence with [G1], [G2] citations
 ```
 
 Tavily is a conditional discovery fallback, not the answer generator. Provider-
@@ -383,17 +386,23 @@ python3 -m scripts.curated_guidelines approve DOCUMENT_ID \
 public DNS resolution, accepts only PDF/HTML/plain text, then stores the original
 bytes and SHA-256 as `pending_review`. It does not create any vector yet. `show`
 extracts preview sections so the reviewer can inspect the frozen content.
-`approve` rechecks the exact hash, performs full-text extraction, chunks only
-inside section boundaries, creates embeddings, and commits the index plus active
-state in one transaction. It records reviewer/time/hash and automatically marks
-an older active version of the same source URL as `superseded`. Admins can also
-`reject` pending candidates or `withdraw` approved documents.
+`approve` rechecks the exact hash, parses parent sections, creates sentence-aware
+child chunks without crossing a parent boundary, embeds `title + section path +
+child text`, and commits the hierarchy plus active state in one transaction. It
+records reviewer/time/hash and automatically marks an older active version of
+the same source URL as `superseded`. Admins can also `reject` pending candidates
+or `withdraw` approved documents.
 
-The catalog, immutable raw bytes and section embeddings are stored in the same
-PostgreSQL instance configured by `POSTGRES_URI`, using the independent
-`guideline_documents` and `guideline_sections` tables. Schema creation is
-idempotent. Embeddings currently use PostgreSQL arrays and deterministic cosine
-ranking in Python, so no pgvector extension is required for the bounded corpus.
+The catalog, immutable raw bytes, parent sections and child embeddings are stored
+in the same PostgreSQL instance configured by `POSTGRES_URI`, using
+`guideline_documents`, `guideline_parent_sections` and `guideline_sections`.
+Child rows retain parent ID, section path, token count, chunk index and previous/
+next IDs. Schema creation/migration is idempotent. Embeddings currently use
+PostgreSQL arrays and deterministic cosine ranking in Python, so no pgvector
+extension is required for the bounded corpus.
+Legacy active rows remain retrievable through the child-only fallback, but they
+must be ingested as a new immutable version to gain hierarchy and neighbor
+metadata; startup never silently rewrites approved evidence.
 
 At query time only documents with `review_status` equal to `approved` or
 `trusted_official`, plus `effective_status=active`, a matching
@@ -443,12 +452,16 @@ explicit test DSN:
 TEST_POSTGRES_URI=postgresql://healthcare:healthcare@localhost:5432/healthcare \
   python3 -m unittest tests.test_curated_guidelines
 ```
-PDFs use outline headings when available and otherwise fall back to page-level
-boundaries; scanned PDFs still require a separately reviewed OCR pipeline. An
-egress proxy remains necessary to close DNS-rebinding risk completely. Embedding uses
-the separately configured GitHub Models endpoint/model; the token needs Models
-read permission. Changing the embedding model intentionally makes old vectors
-ineligible until the documents are re-ingested with that model.
+HTML uses the `h1`-`h6` hierarchy while retaining visible paragraph/list/table
+text. Plain text uses conservative Markdown, numbered and isolated-heading
+heuristics. PDFs prefer outline/bookmark hierarchy, then use pypdf font/layout
+cues, and finally fall back to page boundaries; scanned PDFs still require a
+separately reviewed OCR pipeline. Token counting uses `cl100k_base` when its
+local tiktoken data is available and an offline lexical fallback otherwise. An
+egress proxy remains necessary to close DNS-rebinding risk completely. Embedding
+uses the separately configured GitHub Models endpoint/model; the token needs
+Models read permission. Changing the embedding model intentionally makes old
+vectors ineligible until the documents are re-ingested with that model.
 
 ## Hướng dẫn chạy non-Docker
 - **Để chạy Streamlit UI**: 

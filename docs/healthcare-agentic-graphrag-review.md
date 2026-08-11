@@ -478,11 +478,13 @@ local approved/trusted retrieval
 → auto-ingest tối đa 3 documents hợp lệ
 → SHA-256 snapshot version + deduplication
 → full-text extraction
-→ chunk trong section/page boundary
-→ embedding
-→ PostgreSQL guideline_documents + guideline_sections
+→ parse HTML/PDF/plain-text hierarchy thành parent sections
+→ sentence-aware child chunks theo budget 400 tokens, overlap 50 tokens
+→ prepend document title + section path rồi embedding child
+→ PostgreSQL document + parent/child/position metadata
 → auto-activate với review_status=trusted_official
-→ retry retrieval top-k 3 sections + [G*]
+→ retrieve top-k 3 child chunks
+→ expand bounded parent hoặc previous/next child + [G*]
 ```
 
 ### Invariants quan trọng
@@ -532,8 +534,8 @@ cold-miss fallback, nên request đầu tiên của chủ đề đó có thể c
   không chứng minh nội dung đúng về mặt lâm sàng hay còn là khuyến nghị mới nhất.
 - Corpus miss đầu tiên có latency của search + full download + embedding; các
   request sau dùng document đã persist.
-- PostgreSQL lưu raw document, review/version metadata và section embeddings;
-  cosine hiện vẫn được tính bằng Python nên phù hợp corpus nhỏ.
+- PostgreSQL lưu raw document, review/version metadata, parent hierarchy và
+  child embeddings; cosine hiện vẫn được tính bằng Python nên phù hợp corpus nhỏ.
 - Corpus lớn cần pgvector hoặc một reviewed vector service, không cần đổi
   metadata/review contract.
 - Scanned PDF cần OCR pipeline riêng.
